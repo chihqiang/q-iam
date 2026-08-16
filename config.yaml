@@ -1,0 +1,91 @@
+# ============================================================
+# q-iam 配置文件
+# ------------------------------------------------------------
+# 本文件为 YAML 格式，使用空格缩进（勿用 Tab）。
+# 支持环境变量展开：配置项可用 ${VAR} 或 $VAR 引用环境变量（conf.UseEnv），
+# 常用于覆盖敏感配置，如 secret: ${JWT_SECRET}。
+# ============================================================
+
+# ---------- 应用基础信息 ----------
+app:
+  name: q-iam        # 应用名称（仅用于日志/展示）
+  version: 0.0.1     # 应用版本号
+
+# ---------- HTTP 服务 ----------
+server:
+  host: 0.0.0.0      # 监听地址（0.0.0.0 = 监听所有网卡）
+  port: 8080         # 监听端口（本机被占用时可改用 8082）
+
+# ---------- 数据库 ----------
+db:
+  driver: sqlite     # 驱动：sqlite | mysql | postgres
+  database: ./data.db # sqlite: 文件路径；mysql/postgres: 连接串 "user:pass@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
+  # 连接池（缺省用 orm 默认：max_open_conns=100, max_idle_conns=10, conn_max_lifetime=30m, conn_max_idle_time=10m）
+  # max_open_conns: 100
+  # max_idle_conns: 10
+  # conn_max_lifetime: 30m
+  # conn_max_idle_time: 10m
+
+# ---------- JWT 令牌 ----------
+jwt:
+  # 签名密钥：生产环境务必改为强随机字符串，建议用 ${JWT_SECRET} 环境变量覆盖。
+  # 生成强随机密钥（任选其一）：
+  #   openssl rand -base64 48
+  secret: q-iam-secret-key
+  issuer: q-iam                  # 签发者标识
+  access_token_expire: 2h        # 访问令牌有效期
+  refresh_token_expire: 168h     # 刷新令牌有效期
+  algorithm: HS256               # 签名算法：HS256 | HS384 | HS512
+
+# ---------- 全局安全 ----------
+security:
+  # ---- 密码策略 ----
+  password_policy:
+    min_length: 8             # 最小长度
+    max_length: 64            # 最大长度（<=0 不限制）
+    require_uppercase: false  # 是否要求大写字母
+    require_lowercase: true   # 是否要求小写字母
+    require_digit: true       # 是否要求数字
+    require_special: false    # 是否要求特殊字符
+    min_unique_chars: 0       # 最少不同字符数（0 不限制）
+    forbid_account_name: true # 禁止密码包含账号名
+    history_count: 0          # 密码历史数量（0 不记录）
+    expire_days: 0            # 密码有效期（天，0 不限期）
+
+  # ---- 登录安全 ----
+  login:
+    max_fail_count: 5         # 连续失败锁定阈值（<=0 不锁定）
+    lock_duration: 15m        # 锁定时长
+
+  # ---- 注册 ----
+  register:
+    enabled: true             # 是否开放注册
+
+# ---------- 跨域（CORS） ----------
+cors:
+  # 允许的来源列表，"*" 为全部；生产环境建议配置具体域名
+  allow_origins:
+    - "*"
+
+# ---------- pprof 性能分析 ----------
+# 生产环境务必保持 false（暴露 /debug/pprof 会泄露运行时信息）；需要排查时再开启
+pprof:
+  enabled: true
+
+# ---------- Redis 缓存（可选） ----------
+# 配置后权限集合缓存存 Redis，支持多节点水平扩展；留空则用进程内内存缓存。
+# redis:
+#   addr: "127.0.0.1:6379"
+#   password: ""
+#   db: 0
+#   pool_size: 10
+#   min_idle_conns: 2
+#   key_prefix: "q-iam"
+
+# ---------- 日志 ----------
+logger:
+  level: 0                     # 级别：-1=Debug, 0=Info, 1=Warn, 2=Error
+  encoding: json               # 编码：json | console
+  output:
+    - stdout                  # 输出：stdout 或文件路径
+  caller: true                 # 日志中输出调用位置（文件:行号）
