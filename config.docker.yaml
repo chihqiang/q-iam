@@ -1,0 +1,87 @@
+# ============================================================
+# q-iam Docker 部署专用配置
+# ------------------------------------------------------------
+# 本文件在构建镜像时被复制进容器并命名为 /app/config.yaml 使用，
+# 与本地开发用的 config.yaml 完全分离，互不影响。
+#
+# 通过环境变量展开（conf.UseEnv，即 ${VAR}）注入运行时配置：
+#   - DB_DRIVER  / DB_DATABASE：由 Dockerfile 的 ENV 提供默认值，运行时可用 -e 覆盖
+#   - JWT_SECRET ：敏感数据，不固化进镜像，运行容器时务必用 -e 注入
+#                  （生成：openssl rand -base64 48）
+# ============================================================
+
+# ---------- 应用基础信息 ----------
+app:
+  name: q-iam        # 应用名称（仅用于日志/展示）
+  version: 0.0.1     # 应用版本号
+
+# ---------- HTTP 服务 ----------
+server:
+  host: 0.0.0.0      # 容器内监听所有网卡，由 -p 映射对外
+  port: 8080
+
+# ---------- 数据库 ----------
+db:
+  driver: ${DB_DRIVER}     # 驱动：sqlite | mysql | postgres（Dockerfile 默认 sqlite）
+  database: ${DB_DATABASE} # sqlite: 文件路径（默认 ./data.db）；mysql/postgres: 连接串
+  # 连接池（缺省用 orm 默认：max_open_conns=100, max_idle_conns=10, conn_max_lifetime=30m, conn_max_idle_time=10m）
+  # max_open_conns: 100
+  # max_idle_conns: 10
+  # conn_max_lifetime: 30m
+  # conn_max_idle_time: 10m
+
+# ---------- JWT 令牌 ----------
+jwt:
+  # 签名密钥：不固化进镜像，必须运行时 -e JWT_SECRET=... 注入，否则展开为空。
+  secret: ${JWT_SECRET}
+  issuer: q-iam                  # 签发者标识
+  access_token_expire: 2h        # 访问令牌有效期
+  refresh_token_expire: 168h     # 刷新令牌有效期
+  algorithm: HS256               # 签名算法：HS256 | HS384 | HS512
+
+# ---------- 全局安全 ----------
+security:
+  # ---- 密码策略 ----
+  password_policy:
+    min_length: 8             # 最小长度
+    max_length: 64            # 最大长度（<=0 不限制）
+    require_uppercase: false  # 是否要求大写字母
+    require_lowercase: true   # 是否要求小写字母
+    require_digit: true       # 是否要求数字
+    require_special: false    # 是否要求特殊字符
+    min_unique_chars: 0       # 最少不同字符数（0 不限制）
+    forbid_account_name: true # 禁止密码包含账号名
+    history_count: 0          # 密码历史数量（0 不记录）
+    expire_days: 0            # 密码有效期（天，0 不限期）
+
+  # ---- 登录安全 ----
+  login:
+    max_fail_count: 5         # 连续失败锁定阈值（<=0 不锁定）
+    lock_duration: 15m        # 锁定时长
+
+  # ---- 注册 ----
+  register:
+    enabled: true             # 是否开放注册
+
+  # ---- 反向代理信任 ----
+  # 部署在可信反代（Nginx/网关）之后时置 true，审计/限流才能取到真实客户端 IP；
+  # 直接暴露端口时保持 false，避免伪造 X-Forwarded-For。
+  trust_proxy: false
+
+# ---------- 跨域（CORS） ----------
+cors:
+  # 允许的来源列表，"*" 为全部；生产环境建议配置具体域名
+  allow_origins:
+    - "*"
+
+# ---------- pprof 性能分析 ----------
+# 生产环境务必保持 false（暴露 /debug/pprof 会泄露运行时信息）
+pprof:
+  enabled: false
+
+# ---------- Redis 缓存（可选） ----------
+# 配置后权限集合缓存存 Redis，支持多节点水平扩展；留空则用进程内内存缓存。
+# redis:
+#   addr: "127.0.0.1:6379"
+#   password: ""
+#   db: 0
