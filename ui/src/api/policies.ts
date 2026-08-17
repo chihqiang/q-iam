@@ -13,7 +13,8 @@ export interface PolicyListParams {
 // 策略语句数据范围 DTO（对齐后端 PolicyScopeDTO）
 export interface PolicyScopeDTO {
   scope_type: 'all' | 'group' | 'self' | 'attribute'
-  group_id?: number
+  // group_id 可为 null（Select 清空时写回），提交前由组件归一为 undefined
+  group_id?: number | null
   owner_field?: string
   attr_key?: string
   attr_value?: string

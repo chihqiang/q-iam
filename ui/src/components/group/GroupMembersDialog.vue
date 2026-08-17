@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Loader2, UserPlus } from '@lucide/vue'
 import Modal from '@/components/ui/Modal.vue'
+import Select from '@/components/ui/Select.vue'
 import { useToastStore } from '@/stores/toast'
 import { getGroup, replaceGroupMembers } from '@/api/groups'
 import { allAccounts } from '@/api/accounts'
@@ -31,6 +32,14 @@ const { data: candidateAccounts } = useQuery({
   queryKey: ['accounts-all'],
   queryFn: allAccounts,
 })
+
+// 成员账号选择项（接口数据，支持模糊搜索）
+const memberSelectOptions = computed(() =>
+  (candidateAccounts.value ?? []).map((a) => ({
+    value: a.id,
+    label: `${a.display_name || a.account_name}（${a.account_name}）`,
+  }))
+)
 
 const memberIds = ref<number[]>([])
 const loading = ref(false)
@@ -90,31 +99,14 @@ async function handleSave() {
         <label class="text-sm font-medium text-foreground">
           成员账号（已选 {{ memberIds.length }} 个）
         </label>
-        <div
-          class="grid max-h-80 grid-cols-1 gap-1.5 overflow-y-auto rounded-md border border-border bg-muted/20 p-3 sm:grid-cols-2"
-        >
-          <label
-            v-for="acc in candidateAccounts"
-            :key="acc.id"
-            class="flex cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-primary"
-            :class="memberIds.includes(acc.id) ? 'border-primary bg-primary/5' : ''"
-          >
-            <input
-              v-model="memberIds"
-              type="checkbox"
-              :value="acc.id"
-              class="h-3.5 w-3.5 rounded border-border text-primary focus:ring-primary/30"
-            />
-            <span class="min-w-0">
-              <span class="block truncate font-medium text-foreground">
-                {{ acc.display_name || acc.account_name }}
-              </span>
-              <span class="block truncate text-xs text-muted-foreground">
-                {{ acc.account_name }}
-              </span>
-            </span>
-          </label>
-        </div>
+        <Select
+          v-model="memberIds"
+          :options="memberSelectOptions"
+          placeholder="选择成员账号（可搜索）"
+          multiple
+          filterable
+          clearable
+        />
       </div>
       <p v-else class="rounded-md bg-muted/50 px-3 py-4 text-center text-sm text-muted-foreground">
         暂无可用账号，请先在「账号管理」中创建账号

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { Search, RotateCcw, Loader2, User, Users, Blocks, Lock } from '@lucide/vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import Select from '@/components/ui/Select.vue'
 import { useToastStore } from '@/stores/toast'
 import { listPoliciesByPrincipal, grantPolicies, revokePolicies } from '@/api/grants'
 import { allPolicies } from '@/api/policies'
@@ -71,6 +72,11 @@ const principalOptions = computed(() => {
 function principalLabel(id: number | null): string {
   return principalOptions.value.find((o) => o.id === id)?.label ?? ''
 }
+
+// Select 组件选项（接口数据，支持模糊搜索）
+const principalSelectOptions = computed(() =>
+  principalOptions.value.map((o) => ({ value: o.id, label: o.label }))
+)
 
 // ===== 当前主体展示信息（类型守卫辅助，避免模板内 as any）=====
 
@@ -214,19 +220,16 @@ async function togglePolicy(policy: Policy) {
           </button>
         </div>
 
-        <!-- 主体下拉 -->
+        <!-- 主体下拉（接口数据，支持模糊搜索） -->
         <div class="flex min-w-0 flex-1 items-center gap-3">
-          <select
+          <Select
             v-model="principalId"
-            class="h-9 w-full max-w-xs rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
-          >
-            <option :value="null">
-              请选择{{ principalTypes.find((t) => t.value === principalType)?.label }}…
-            </option>
-            <option v-for="opt in principalOptions" :key="opt.id" :value="opt.id">
-              {{ opt.label }}
-            </option>
-          </select>
+            :options="principalSelectOptions"
+            :placeholder="`请选择${principalTypes.find((t) => t.value === principalType)?.label ?? ''}…`"
+            filterable
+            clearable
+            class="w-full max-w-xs"
+          />
         </div>
       </div>
 

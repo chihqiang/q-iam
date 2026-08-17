@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { reactive, ref, watch, computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Loader2 } from '@lucide/vue'
 import Modal from '@/components/ui/Modal.vue'
+import Select from '@/components/ui/Select.vue'
 import { useToastStore } from '@/stores/toast'
 import { createAccount, updateAccount, getAccount } from '@/api/accounts'
 import { allGroups } from '@/api/groups'
@@ -33,6 +34,11 @@ const { data: groupOptions } = useQuery({
   queryKey: ['groups-all'],
   queryFn: allGroups,
 })
+
+// 账号组选择项（接口数据，支持模糊搜索）
+const groupSelectOptions = computed(() =>
+  (groupOptions.value ?? []).map((g) => ({ value: g.id, label: g.display_name || g.name }))
+)
 
 interface AccountForm {
   account_name: string
@@ -245,26 +251,17 @@ const inputCls =
       </div>
       <div class="space-y-1.5">
         <label class="text-sm font-medium text-foreground">所属账号组</label>
-        <div
-          v-if="groupOptions && groupOptions.length > 0"
-          class="flex flex-wrap gap-2 rounded-md border border-border bg-muted/20 p-3"
-        >
-          <label
-            v-for="g in groupOptions"
-            :key="g.id"
-            class="flex cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-3 py-1.5 text-sm transition-colors hover:border-primary"
-            :class="form.group_ids.includes(g.id) ? 'border-primary bg-primary/5' : ''"
-          >
-            <input
-              v-model="form.group_ids"
-              type="checkbox"
-              :value="g.id"
-              class="h-3.5 w-3.5 rounded border-border text-primary focus:ring-primary/30"
-            />
-            {{ g.display_name || g.name }}
-          </label>
-        </div>
-        <p v-else class="text-xs text-muted-foreground">暂无可用账号组</p>
+        <Select
+          v-model="form.group_ids"
+          :options="groupSelectOptions"
+          placeholder="选择账号组（可搜索）"
+          multiple
+          filterable
+          clearable
+        />
+        <p v-if="!groupOptions || groupOptions.length === 0" class="text-xs text-muted-foreground">
+          暂无可用账号组
+        </p>
       </div>
       <p v-if="error" class="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
         {{ error }}

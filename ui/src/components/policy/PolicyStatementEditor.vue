@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { Plus, Trash2, X, ChevronDown, ChevronRight } from '@lucide/vue'
+import Select from '@/components/ui/Select.vue'
 import { allGroups } from '@/api/groups'
 import type { Group } from '@/types'
 import type { PolicyStatementDTO, PolicyScopeDTO } from '@/api/policies'
@@ -28,6 +29,27 @@ async function loadGroups() {
   }
 }
 onMounted(loadGroups)
+
+// 账号组选择项（接口数据，支持模糊搜索）
+const groupSelectOptions = computed(() =>
+  groups.value.map((g) => ({
+    value: g.id,
+    label: `${g.name}${g.display_name && g.display_name !== g.name ? '（' + g.display_name + '）' : ''}`,
+  }))
+)
+
+// Select 清空（clearable）单选会写回 null，归一到 undefined 以匹配 scope.group_id 类型
+watch(
+  model,
+  (stmts) => {
+    for (const s of stmts) {
+      for (const sc of s.scopes) {
+        if (sc.group_id === null) sc.group_id = undefined
+      }
+    }
+  },
+  { deep: true }
+)
 
 // 下拉无法表达「无选中」时展示的占位组（组已删除但数据里仍引用其 id）
 function groupLabel(id: number | undefined): string {
@@ -215,22 +237,16 @@ function toggleCollapse(i: number) {
                 </button>
               </div>
 
-              <!-- group：本用户分组（从账号组下拉选择，避免手填 id 出错） -->
+              <!-- group：本用户分组（从账号组下拉选择，支持模糊搜索） -->
               <div v-if="scope.scope_type === 'group'" class="space-y-1.5">
                 <label class="text-xs text-muted-foreground">用户分组（数据记录按分组归属，多行=多组并集）</label>
-                <select
+                <Select
                   v-model="scope.group_id"
-                  class="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-                >
-                  <option :value="undefined" disabled>请选择账号组</option>
-                  <option
-                    v-for="g in groups"
-                    :key="g.id"
-                    :value="g.id"
-                  >
-                    {{ g.name }}{{ g.display_name && g.display_name !== g.name ? '（' + g.display_name + '）' : '' }}
-                  </option>
-                </select>
+                  :options="groupSelectOptions"
+                  placeholder="请选择账号组"
+                  filterable
+                  clearable
+                />
                 <p v-if="scope.group_id && !groups.some((g) => g.id === scope.group_id)" class="text-xs text-amber-500">
                   当前所选分组（{{ groupLabel(scope.group_id) }}）不在可选项内，保存后仍会按该分组过滤，但可能已被删除或无权限。
                 </p>
