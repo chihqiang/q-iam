@@ -9,9 +9,9 @@ type AuditLog struct {
 	// OperatorID 操作人账号 ID，0 表示匿名（未登录）或系统操作。
 	OperatorID int64 `json:"operator_id" gorm:"index;comment:操作人账号ID"`
 	// OperatorName 操作人账号名（冗余存储，便于检索展示）。
-	OperatorName string `json:"operator_name" gorm:"size:64;index;comment:操作人账号名"`
+	OperatorName string `json:"operator_name" gorm:"size:64;index;index:idx_audit_operator_created,priority:1;comment:操作人账号名"`
 	// Module 操作模块：auth/account/group/policy/grant/app/oauth。
-	Module string `json:"module" gorm:"size:32;index;comment:操作模块"`
+	Module string `json:"module" gorm:"size:32;index;index:idx_audit_module_created,priority:1;comment:操作模块"`
 	// Action 操作动作：login/create/update/delete/grant/revoke/reset_secret/authorize 等。
 	Action string `json:"action" gorm:"size:32;index;comment:操作动作"`
 	// Method HTTP 方法。
@@ -31,7 +31,7 @@ type AuditLog struct {
 	// LatencyMs 耗时（毫秒）。
 	LatencyMs int64 `json:"latency_ms" gorm:"comment:耗时(毫秒)"`
 	// CreatedAt 操作时间。
-	CreatedAt time.Time `json:"created_at" gorm:"index;comment:操作时间"`
+	CreatedAt time.Time `json:"created_at" gorm:"index;index:idx_audit_module_created,priority:2;index:idx_audit_operator_created,priority:2;comment:操作时间"`
 }
 
 // TableName 指定表名。

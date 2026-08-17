@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"chihqiang/q-iam/logic"
+	"chihqiang/q-iam/middleware"
 
 	"github.com/chihqiang/infra-go/httpx"
 )
@@ -20,7 +21,7 @@ func NewPolicyHandler(svc *logic.PolicyLogic) *PolicyHandler {
 	return &PolicyHandler{svc: svc}
 }
 
-// List 策略列表。
+// List 策略列表（按数据范围过滤）。
 func (h *PolicyHandler) List(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req logic.PolicyListRequest
@@ -28,7 +29,7 @@ func (h *PolicyHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.List(ctx, &req)
+	resp, err := h.svc.List(ctx, accountIDForScope(ctx), &req)
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -36,10 +37,10 @@ func (h *PolicyHandler) List(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, resp)
 }
 
-// AllList 全部启用的策略。
+// AllList 全部启用的策略（授权选择用，按数据范围过滤）。
 func (h *PolicyHandler) AllList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	policies, err := h.svc.AllList(ctx)
+	policies, err := h.svc.AllList(ctx, accountIDForScope(ctx))
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -47,13 +48,26 @@ func (h *PolicyHandler) AllList(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, policies)
 }
 
-// Detail 策略详情。
+// Detail 策略详情（按数据范围校验可见性，防止越权查看）。
 func (h *PolicyHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
+	}
+
+	viewerID := accountIDForScope(ctx)
+	if viewerID > 0 {
+		ok, err := h.svc.CanViewPolicy(ctx, viewerID, id)
+		if err != nil {
+			httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
+			return
+		}
+		if !ok {
+			httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeForbidden, "无权限访问")
+			return
+		}
 	}
 
 	policy, err := h.svc.GetByID(ctx, id)
@@ -70,6 +84,11 @@ func (h *PolicyHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req logic.PolicyCreateRequest
 	if err := httpx.MustBindJSON(w, r, &req); err != nil {
 		return
+	}
+
+	// 注入创建者 ID（从当前登录账号上下文），供数据范围 self=本人创建 过滤
+	if account := middleware.AccountFromContext(ctx); account != nil {
+		req.CreatedBy = account.ID
 	}
 
 	policy, err := h.svc.Create(ctx, &req)

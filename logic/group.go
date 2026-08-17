@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"chihqiang/q-iam/model"
 
@@ -34,8 +35,10 @@ type GroupListRequest struct {
 	Key    string `form:"key"`
 }
 
-// List 账号组分页列表。
-func (s *GroupLogic) List(ctx context.Context, req *GroupListRequest) (*PageResponse[model.Group], error) {
+// List 账号组分页列表（按数据权限过滤可见范围）。
+// accountID<=0（admin/系统主体）不过滤；否则按该账号对 iam:group:read 的
+// 数据范围过滤（self=本人所属组，group=指定组）。
+func (s *GroupLogic) List(ctx context.Context, accountID int64, req *GroupListRequest) (*PageResponse[model.Group], error) {
 	var groups []model.Group
 	var total int64
 
@@ -47,6 +50,9 @@ func (s *GroupLogic) List(ctx context.Context, req *GroupListRequest) (*PageResp
 		like := "%" + req.Key + "%"
 		query = query.Where("name LIKE ? OR display_name LIKE ?", like, like)
 	}
+
+	// 数据范围过滤（非 admin 账号按 iam:group:read 的数据范围可见性过滤）
+	s.applyGroupScope(ctx, query, accountID)
 
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
@@ -60,11 +66,67 @@ func (s *GroupLogic) List(ctx context.Context, req *GroupListRequest) (*PageResp
 	return &PageResponse[model.Group]{Data: groups, Total: total}, nil
 }
 
+// applyGroupScope 按当前账号对账号组资源（iam:group:read）的数据范围过滤查询。
+// accountID<=0 或权限逻辑未注入时不过滤（全量）。数据范围加载失败时保守降级为仅本人所属组。
+// 语义：
+//   - all/未限定 → 全量；
+//   - self → 仅本人所属的账号组（q_iam_account_groups 中 account_id=本人）；
+//   - group → 指定的组本身（id IN group_ids）；
+//   - attribute → 已降级为 self。
+func (s *GroupLogic) applyGroupScope(ctx context.Context, query *gorm.DB, accountID int64) {
+	if accountID <= 0 || s.permLogic == nil {
+		return
+	}
+	groupTable := model.Group{}.TableName() // q_iam_groups
+
+	scope, err := s.permLogic.DataScopeForAction(ctx, "iam:group:read", accountID)
+	if err != nil {
+		logger.WarnCtx(ctx, "load group data scope failed, fallback to self",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		query.Where("EXISTS (SELECT 1 FROM q_iam_account_groups ag WHERE ag.group_id = "+groupTable+".id AND ag.account_id = ?)", accountID)
+		return
+	}
+	if scope.All {
+		return
+	}
+
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if scope.SelfOnly {
+		// 仅本人所属组
+		conds = append(conds, "EXISTS (SELECT 1 FROM q_iam_account_groups ag WHERE ag.group_id = "+groupTable+".id AND ag.account_id = ?)")
+		args = append(args, accountID)
+	}
+	if len(scope.GroupIDs) > 0 {
+		conds = append(conds, groupTable+".id IN ?")
+		args = append(args, scope.GroupIDs)
+	}
+	if len(conds) == 0 {
+		query.Where("1 = 0")
+		return
+	}
+	query.Where(strings.Join(conds, " OR "), args...)
+}
+
 // AllList 返回全部启用的账号组（用于下拉选择）。
-func (s *GroupLogic) AllList(ctx context.Context) ([]model.Group, error) {
+// accountID<=0 返回全部；否则按数据范围过滤，防止下拉选择越权账号组。
+func (s *GroupLogic) AllList(ctx context.Context, accountID int64) ([]model.Group, error) {
 	var groups []model.Group
-	err := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC").Find(&groups).Error
+	query := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC")
+	s.applyGroupScope(ctx, query, accountID)
+	err := query.Find(&groups).Error
 	return groups, err
+}
+
+// CanViewGroup 判断账号 viewerID 是否有权查看账号组 targetID 的详情。
+// 委托 PermissionLogic.CanAccessPrincipal 基于 iam:group:read 数据范围判定。
+// 供详情接口做数据范围校验，防止「列表已过滤但详情接口按 ID 枚举绕过」越权。
+// 权限逻辑未注入时保守拒绝（返回 false）。
+func (s *GroupLogic) CanViewGroup(ctx context.Context, viewerID, targetID int64) (bool, error) {
+	if s.permLogic == nil {
+		return false, nil
+	}
+	return s.permLogic.CanAccessPrincipal(ctx, viewerID, model.PrincipalTypeGroup, targetID)
 }
 
 // GetByID 账号组详情（含组内账号）。

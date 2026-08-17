@@ -2,8 +2,10 @@ package logic
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"chihqiang/q-iam/model"
 
@@ -23,6 +25,13 @@ const (
 	// 阻塞发生在响应已写出之后（审计在 next 之后执行），对业务吞吐影响可控，
 	// 相比原先直接丢弃大幅降低审计丢失概率。
 	auditEnqueueTimeout = 5 * time.Second
+	// auditMaxRetry 单批落库失败后的最大重试次数，超过后丢弃并告警。
+	// 防瞬时 DB 抖动（锁冲突/连接中断）整批丢失；持续故障时避免无界重试堆积。
+	auditMaxRetry = 3
+	// auditSearchMinLen 审计全文搜索关键字最小长度。
+	// detail/path 的 LIKE '%key%' 为前导通配，无法走索引，过短关键字易触发全表扫，
+	// 低于此长度时忽略 key 过滤（仅告警），防审计页被低价值查询拖垮。
+	auditSearchMinLen = 2
 )
 
 // AuditLogic 操作审计逻辑：记录与查询操作审计日志。
@@ -120,34 +129,72 @@ func (s *AuditLogic) enqueue(ctx context.Context, log *model.AuditLog) (ok bool)
 	}
 }
 
-// flushLoop 消费队列并批量落库。
+// auditPending 落库失败待重试的批次。
+type auditPending struct {
+	logs    []*model.AuditLog
+	retries int
+}
+
+// insertBatch 批量落库（带超时上下文），返回错误供上层决定重试。
+func (s *AuditLogic) insertBatch(logs []*model.AuditLog) error {
+	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.db.WithContext(cctx).Create(&logs).Error
+}
+
+// flushLoop 消费队列并批量落库（失败重试，超限丢弃）。
 func (s *AuditLogic) flushLoop() {
 	defer s.wg.Done()
 
 	batch := make([]*model.AuditLog, 0, auditBatchSize)
+	var pending []*auditPending
+
+	// flush 当前攒批并进入失败重试队列
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		logs := batch
 		batch = make([]*model.AuditLog, 0, auditBatchSize)
-		cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := s.db.WithContext(cctx).Create(&logs).Error; err != nil {
-			logger.ErrorCtx(context.Background(), "audit flush failed",
+		if err := s.insertBatch(logs); err != nil {
+			logger.ErrorCtx(context.Background(), "audit flush failed, will retry",
 				logger.Err(err), logger.Int("count", len(logs)))
+			pending = append(pending, &auditPending{logs: logs, retries: 1})
 		}
+	}
+
+	// retryPending 重试失败批次（先于新批次），超限丢弃并告警
+	retryPending := func() {
+		if len(pending) == 0 {
+			return
+		}
+		var next []*auditPending
+		for _, p := range pending {
+			if err := s.insertBatch(p.logs); err != nil {
+				if p.retries < auditMaxRetry {
+					next = append(next, &auditPending{logs: p.logs, retries: p.retries + 1})
+				} else {
+					logger.ErrorCtx(context.Background(), "audit flush dropped after max retries",
+						logger.Int("count", len(p.logs)), logger.Int("retries", p.retries))
+				}
+			}
+		}
+		pending = next
 	}
 
 	ticker := time.NewTicker(auditFlushInterval)
 	defer ticker.Stop()
 
 	for {
+		// 每轮先重试失败批次（低流量下也能持续推进重试）
+		retryPending()
+
 		select {
 		case log, ok := <-s.queue:
 			if !ok {
-				// 队列关闭：排空剩余后退出
+				// 队列关闭：排空剩余 + 最后一次重试后退出
 				flush()
+				retryPending()
 				return
 			}
 			batch = append(batch, log)
@@ -191,8 +238,17 @@ func (s *AuditLogic) List(ctx context.Context, req *AuditListRequest) (*PageResp
 		query = query.Where("operator_name = ?", req.Operator)
 	}
 	if req.Key != "" {
-		like := "%" + req.Key + "%"
-		query = query.Where("detail LIKE ? OR path LIKE ? OR operator_name LIKE ?", like, like, like)
+		key := strings.TrimSpace(req.Key)
+		if key == "" {
+			// 纯空白关键字：忽略
+		} else if utf8.RuneCountInString(key) < auditSearchMinLen {
+			// 过短关键字：前导通配 LIKE 无法走索引，忽略并告警，防全表扫
+			logger.WarnCtx(ctx, "audit search key too short, ignored",
+				logger.String("key", key), logger.Int("min_len", auditSearchMinLen))
+		} else {
+			like := "%" + key + "%"
+			query = query.Where("detail LIKE ? OR path LIKE ? OR operator_name LIKE ?", like, like, like)
+		}
 	}
 	if req.From != "" {
 		if t, err := time.Parse(time.RFC3339, req.From); err == nil {

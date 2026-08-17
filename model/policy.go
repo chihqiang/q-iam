@@ -63,6 +63,10 @@ type PolicyStatement struct {
 	Effect string `json:"effect" gorm:"size:8;not null;comment:效果 Allow/Deny"`
 	// Action 操作（逗号分隔，如 "iam:CreateAccount,iam:UpdateAccount"）。
 	Action string `json:"action" gorm:"type:text;not null;comment:操作(逗号分隔)"`
+	// Resource 资源（支持 * 通配，空或 * 表示全部资源）。
+	// 用于表达资源级授权（如 deptA:account:*）；管理接口无资源上下文时仅
+	// 空/* 的规则参与判定，带资源限定的规则须由带资源上下文的判定入口生效。
+	Resource string `json:"resource" gorm:"type:text;default:*;comment:资源(通配*,默认*)"`
 	// Scopes 数据范围明细（数据权限：可见/操作哪部分数据，每条一行）。
 	Scopes []DataScope `json:"scopes" gorm:"foreignKey:StatementID"`
 	// Sort 排序。

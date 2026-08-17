@@ -100,8 +100,10 @@ type AccountItem struct {
 	CreatedAt    string `json:"created_at"`
 }
 
-// List 账号分页列表。
-func (s *AccountLogic) List(ctx context.Context, req *AccountListRequest) (*PageResponse[AccountItem], error) {
+// List 账号分页列表（按数据权限过滤可见范围）。
+// accountID 为数据范围过滤主体：<=0（admin/系统主体）不过滤（全量）；
+// 否则按该账号对 iam:account:read 的数据范围（self/group）过滤，防止越权查看。
+func (s *AccountLogic) List(ctx context.Context, accountID int64, req *AccountListRequest) (*PageResponse[AccountItem], error) {
 	var accounts []model.Account
 	var total int64
 
@@ -113,6 +115,9 @@ func (s *AccountLogic) List(ctx context.Context, req *AccountListRequest) (*Page
 		like := "%" + req.Key + "%"
 		query = query.Where("account_name LIKE ? OR display_name LIKE ? OR email LIKE ?", like, like, like)
 	}
+
+	// 数据范围过滤（非 admin 账号按 iam:account:read 的数据范围可见性过滤）
+	s.applyAccountScope(ctx, query, accountID)
 
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
@@ -130,6 +135,45 @@ func (s *AccountLogic) List(ctx context.Context, req *AccountListRequest) (*Page
 	return &PageResponse[AccountItem]{Data: items, Total: total}, nil
 }
 
+// applyAccountScope 按当前账号对账号资源的数据范围过滤查询。
+// accountID<=0（admin/系统主体）或权限逻辑未注入时不过滤（全量）。
+// 数据范围加载失败时保守降级为仅本人可见，避免越权。
+func (s *AccountLogic) applyAccountScope(ctx context.Context, query *gorm.DB, accountID int64) {
+	if accountID <= 0 || s.permLogic == nil {
+		return
+	}
+	acctTable := model.Account{}.TableName() // q_iam_accounts
+
+	scope, err := s.permLogic.AccountDataScope(ctx, accountID)
+	if err != nil {
+		logger.WarnCtx(ctx, "load account data scope failed, fallback to self",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		query.Where(acctTable+".id = ?", accountID)
+		return
+	}
+	if scope.All {
+		return
+	}
+
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if scope.SelfOnly {
+		conds = append(conds, acctTable+".id = ?")
+		args = append(args, accountID)
+	}
+	if len(scope.GroupIDs) > 0 {
+		// 账号组多对多关联表（q_iam_account_groups，见 model.Account 的 many2many 标签）
+		conds = append(conds, "EXISTS (SELECT 1 FROM q_iam_account_groups ag WHERE ag.account_id = "+acctTable+".id AND ag.group_id IN ?)")
+		args = append(args, scope.GroupIDs)
+	}
+	if len(conds) == 0 {
+		// 无任何可见范围：返回空集
+		query.Where("1 = 0")
+		return
+	}
+	query.Where(strings.Join(conds, " OR "), args...)
+}
+
 // GetByID 账号详情（含所属账号组）。
 func (s *AccountLogic) GetByID(ctx context.Context, id int64) (*model.Account, error) {
 	var account model.Account
@@ -139,12 +183,27 @@ func (s *AccountLogic) GetByID(ctx context.Context, id int64) (*model.Account, e
 	return &account, nil
 }
 
+// CanViewAccount 判断账号 viewerID 是否有权查看账号 targetID 的详情。
+// 委托 PermissionLogic.CanAccessPrincipal 基于 iam:account:read 数据范围判定。
+// 供详情接口做数据范围校验，防止「列表已过滤但详情接口按 ID 枚举绕过」越权。
+// 权限逻辑未注入时保守拒绝（返回 false）。
+func (s *AccountLogic) CanViewAccount(ctx context.Context, viewerID, targetID int64) (bool, error) {
+	if s.permLogic == nil {
+		return false, nil
+	}
+	return s.permLogic.CanAccessPrincipal(ctx, viewerID, model.PrincipalTypeAccount, targetID)
+}
+
 // AllList 全部启用的账号（用于授权下拉选择）。
 // 与 List 不同：不分页、不过滤 AllowConsole，仅按启用状态返回完整列表。
-// 返回的账号含敏感字段（Password 带 json:"-" 不序列化），仅限管理接口使用。
-func (s *AccountLogic) AllList(ctx context.Context) ([]model.Account, error) {
+// accountID<=0（admin/系统主体）返回全部；否则按数据权限过滤可见范围，
+// 防止下拉选择越权账号。返回的账号含敏感字段（Password 带 json:"-" 不序列化），仅限管理接口使用。
+func (s *AccountLogic) AllList(ctx context.Context, accountID int64) ([]model.Account, error) {
 	var accounts []model.Account
-	err := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC").Find(&accounts).Error
+	query := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC")
+	// 数据范围过滤（同 List）
+	s.applyAccountScope(ctx, query, accountID)
+	err := query.Find(&accounts).Error
 	return accounts, err
 }
 
@@ -334,8 +393,8 @@ func (s *AccountLogic) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 
-	// 保护内置管理员账号（账号名不可删除，见 model.AdminAccountName）
-	if account.AccountName == model.AdminAccountName {
+	// 保护内置管理员账号（超级管理员不可删除）
+	if account.IsAdmin {
 		return errors.New("不能删除内置管理员账号")
 	}
 

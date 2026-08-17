@@ -19,7 +19,7 @@ func NewGroupHandler(svc *logic.GroupLogic) *GroupHandler {
 	return &GroupHandler{svc: svc}
 }
 
-// List 账号组列表。
+// List 账号组列表（按数据范围过滤）。
 func (h *GroupHandler) List(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req logic.GroupListRequest
@@ -27,7 +27,7 @@ func (h *GroupHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.List(ctx, &req)
+	resp, err := h.svc.List(ctx, accountIDForScope(ctx), &req)
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -35,10 +35,10 @@ func (h *GroupHandler) List(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, resp)
 }
 
-// AllList 全部启用的账号组。
+// AllList 全部启用的账号组（授权下拉选择用，按数据范围过滤）。
 func (h *GroupHandler) AllList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	groups, err := h.svc.AllList(ctx)
+	groups, err := h.svc.AllList(ctx, accountIDForScope(ctx))
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -46,13 +46,26 @@ func (h *GroupHandler) AllList(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, groups)
 }
 
-// Detail 账号组详情。
+// Detail 账号组详情（按数据范围校验可见性，防止越权查看）。
 func (h *GroupHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
+	}
+
+	viewerID := accountIDForScope(ctx)
+	if viewerID > 0 {
+		ok, err := h.svc.CanViewGroup(ctx, viewerID, id)
+		if err != nil {
+			httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
+			return
+		}
+		if !ok {
+			httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeForbidden, "无权限访问")
+			return
+		}
 	}
 
 	group, err := h.svc.GetByID(ctx, id)

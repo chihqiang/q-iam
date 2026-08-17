@@ -143,3 +143,40 @@ func TestKVStoreContract(t *testing.T) {
 	var _ KVStore = (*RedisStore)(nil) // 编译期断言 RedisStore 也实现 KVStore
 	_ = context.Background()
 }
+
+// TestDBStoreCleanupLoop 验证后台过期清理 worker：删除带 TTL 的过期键，
+// 保留未过期键与不过期（expires_at NULL）键。
+func TestDBStoreCleanupLoop(t *testing.T) {
+	s := newTestDBStore(t)
+	ctx := context.Background()
+
+	if err := s.Set(ctx, "expired-set", "v", 30*time.Millisecond); err != nil {
+		t.Fatalf("set expired: %v", err)
+	}
+	if ok, err := s.SetNX(ctx, "expired-once", "1", 30*time.Millisecond); err != nil || !ok {
+		t.Fatalf("setnx expired-once: ok=%v err=%v", ok, err)
+	}
+	if err := s.Set(ctx, "alive", "v", time.Hour); err != nil {
+		t.Fatalf("set alive: %v", err)
+	}
+	if err := s.Set(ctx, "no-ttl", "v", 0); err != nil {
+		t.Fatalf("set no-ttl: %v", err)
+	}
+
+	// 等过期键到期后启动清理 worker
+	time.Sleep(60 * time.Millisecond)
+	s.StartCleanupLoop(20 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+
+	for _, k := range []string{"expired-set", "expired-once"} {
+		if v, _ := s.Get(ctx, k); v != "" {
+			t.Errorf("key %q should be cleaned by background loop, got %q", k, v)
+		}
+	}
+	for _, k := range []string{"alive", "no-ttl"} {
+		if v, _ := s.Get(ctx, k); v == "" {
+			t.Errorf("key %q should be kept, but gone", k)
+		}
+	}
+	s.Close()
+}

@@ -5,7 +5,6 @@ import (
 
 	"chihqiang/q-iam/handler"
 	"chihqiang/q-iam/middleware"
-	"chihqiang/q-iam/model"
 	"chihqiang/q-iam/svc"
 	"chihqiang/q-iam/ui"
 
@@ -108,7 +107,8 @@ func Register(server *httpx.Server, ctx *svc.ServiceContext) {
 	v1.AddRoute(httpx.Route{Method: http.MethodGet, Path: "/oauth/app-info", Handler: oauthHandler.AppInfo})
 
 	// 需要认证的路由组
-	authMw := middleware.Auth(ctx.JWT)
+	// Auth 中间件带访问令牌撤销黑名单检查（登出后 access token 立即失效）
+	authMw := middleware.Auth(ctx.JWT, ctx.AuthLogic.IsAccessTokenRevoked)
 	loadAccountMw := middleware.LoadAccount(ctx.AuthLogic)
 	authed := v1.Group("", authMw, loadAccountMw)
 	authed.AddRoute(httpx.Route{Method: http.MethodGet, Path: "/auth/me", Handler: authHandler.Me})
@@ -129,11 +129,10 @@ func Register(server *httpx.Server, ctx *svc.ServiceContext) {
 	// 供子系统按需拉取；内部按令牌主体类型解析，不走 LoadAccount。
 	authOnly.AddRoute(httpx.Route{Method: http.MethodGet, Path: "/auth/data-permissions", Handler: authHandler.DataPermissions})
 
-	// 权限中间件：admin 账号（内置管理员，见 model.AdminAccountName）拥有全部权限。
+	// 权限中间件：超级管理员（model.Account.IsAdmin=true，内置 admin）拥有全部权限。
 	// perm(action) —— 动作级校验（校验当前账号是否拥有指定 action 权限）
-	adminName := model.AdminAccountName
 	perm := func(action string) httpx.Middleware {
-		return middleware.Permission(ctx.PermissionLogic, action, adminName)
+		return middleware.Permission(ctx.PermissionLogic, action)
 	}
 
 	// 账号管理（身份管理）

@@ -17,11 +17,18 @@ import (
 type AppLogic struct {
 	db     *gorm.DB
 	cipher *Cipher
+	// permLogic 权限逻辑（应用列表按数据范围过滤，nil 表示不过滤）。
+	permLogic *PermissionLogic
 }
 
 // NewAppLogic 创建应用管理逻辑。
 func NewAppLogic(db *gorm.DB, cipher *Cipher) *AppLogic {
 	return &AppLogic{db: db, cipher: cipher}
+}
+
+// SetPermissionLogic 注入权限逻辑（应用列表按数据范围过滤）。
+func (s *AppLogic) SetPermissionLogic(permLogic *PermissionLogic) {
+	s.permLogic = permLogic
 }
 
 // AppListRequest 应用列表请求。
@@ -45,8 +52,10 @@ type AppItem struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-// List 应用分页列表。
-func (s *AppLogic) List(ctx context.Context, req *AppListRequest) (*PageResponse[AppItem], error) {
+// List 应用分页列表（按数据权限过滤可见范围）。
+// accountID<=0（admin/系统主体）不过滤；否则按该账号对 iam:app:read 的
+// 数据范围过滤（self=本人拥有，group=可见组成员拥有）。
+func (s *AppLogic) List(ctx context.Context, accountID int64, req *AppListRequest) (*PageResponse[AppItem], error) {
 	var apps []model.App
 	var total int64
 
@@ -58,6 +67,9 @@ func (s *AppLogic) List(ctx context.Context, req *AppListRequest) (*PageResponse
 		like := "%" + req.Key + "%"
 		query = query.Where("name LIKE ? OR app_id LIKE ?", like, like)
 	}
+
+	// 数据范围过滤（非 admin 账号按 iam:app:read 的数据范围可见性过滤）
+	s.applyAppScope(ctx, query, accountID)
 
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
@@ -75,11 +87,67 @@ func (s *AppLogic) List(ctx context.Context, req *AppListRequest) (*PageResponse
 	return &PageResponse[AppItem]{Data: items, Total: total}, nil
 }
 
+// applyAppScope 按当前账号对应用资源（iam:app:read）的数据范围过滤查询。
+// accountID<=0 或权限逻辑未注入时不过滤（全量）。数据范围加载失败时保守降级为仅本人拥有。
+// 语义：
+//   - all/未限定 → 全量；
+//   - self → 仅本人拥有的应用（owner_account_id=本人）；
+//   - group → 可见组成员拥有的应用（owner 属于指定组）；
+//   - attribute → 已降级为 self。
+func (s *AppLogic) applyAppScope(ctx context.Context, query *gorm.DB, accountID int64) {
+	if accountID <= 0 || s.permLogic == nil {
+		return
+	}
+	appTable := model.App{}.TableName() // q_iam_apps
+
+	scope, err := s.permLogic.DataScopeForAction(ctx, "iam:app:read", accountID)
+	if err != nil {
+		logger.WarnCtx(ctx, "load app data scope failed, fallback to self",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		query.Where(appTable+".owner_account_id = ?", accountID)
+		return
+	}
+	if scope.All {
+		return
+	}
+
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if scope.SelfOnly {
+		conds = append(conds, appTable+".owner_account_id = ?")
+		args = append(args, accountID)
+	}
+	if len(scope.GroupIDs) > 0 {
+		// 应用归属者（owner_account_id）属于可见组的应用可见
+		conds = append(conds, "EXISTS (SELECT 1 FROM q_iam_account_groups ag WHERE ag.account_id = "+appTable+".owner_account_id AND ag.group_id IN ?)")
+		args = append(args, scope.GroupIDs)
+	}
+	if len(conds) == 0 {
+		query.Where("1 = 0")
+		return
+	}
+	query.Where(strings.Join(conds, " OR "), args...)
+}
+
 // AllList 返回全部启用的应用（用于下拉选择）。
-func (s *AppLogic) AllList(ctx context.Context) ([]model.App, error) {
+// accountID<=0 返回全部；否则按数据范围过滤，防止下拉选择越权应用。
+func (s *AppLogic) AllList(ctx context.Context, accountID int64) ([]model.App, error) {
 	var apps []model.App
-	err := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC").Find(&apps).Error
+	query := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC")
+	s.applyAppScope(ctx, query, accountID)
+	err := query.Find(&apps).Error
 	return apps, err
+}
+
+// CanViewApp 判断账号 viewerID 是否有权查看应用 targetID 的详情。
+// 委托 PermissionLogic.CanAccessPrincipal 基于 iam:app:read 数据范围判定。
+// 供详情接口做数据范围校验，防止「列表已过滤但详情接口按 ID 枚举绕过」越权。
+// 权限逻辑未注入时保守拒绝（返回 false）。
+func (s *AppLogic) CanViewApp(ctx context.Context, viewerID, targetID int64) (bool, error) {
+	if s.permLogic == nil {
+		return false, nil
+	}
+	return s.permLogic.CanAccessPrincipal(ctx, viewerID, model.PrincipalTypeApp, targetID)
 }
 
 // GetByID 应用详情（隐藏密钥）。

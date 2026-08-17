@@ -67,7 +67,7 @@ func newLoadAccountTestEnv(t *testing.T) (*jwt.JWT, *logic.AuthLogic, *gorm.DB, 
 // chain 组装 Auth → LoadAccount → next 的完整中间件链（与 route.go 的 authed 组一致）。
 func chain(t *testing.T, j *jwt.JWT, authSvc *logic.AuthLogic, next http.HandlerFunc) http.HandlerFunc {
 	t.Helper()
-	return Auth(j)(LoadAccount(authSvc)(next))
+	return Auth(j, nil)(LoadAccount(authSvc)(next))
 }
 
 // TestLoadAccount_RejectsAppToken 回归测试：应用令牌（client_credentials）不得被 LoadAccount
@@ -129,12 +129,14 @@ func TestLoadAccount_AllowsUserToken(t *testing.T) {
 	nextCalled := false
 	handler := chain(t, j, authSvc, func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
-		acct := AccountFromContext(r.Context())
-		if acct == nil {
+		loaded := AccountFromContext(r.Context())
+		if loaded == nil {
 			t.Fatal("user token should load account into context")
 		}
-		if acct.ID != acct.ID {
-			t.Fatalf("loaded account id mismatch")
+		// 校验加载的账号与令牌声明一致（修复原 acct.ID != acct.ID 死代码）
+		if loaded.ID != acct.ID || loaded.AccountName != acct.AccountName {
+			t.Fatalf("loaded account mismatch: got id=%d name=%s, want id=%d name=%s",
+				loaded.ID, loaded.AccountName, acct.ID, acct.AccountName)
 		}
 	})
 

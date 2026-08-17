@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { Plus, Trash2, X, ChevronDown, ChevronRight } from '@lucide/vue'
+import { allGroups } from '@/api/groups'
+import type { Group } from '@/types'
 import type { PolicyStatementDTO, PolicyScopeDTO } from '@/api/policies'
 
 const EFFECTS = ['Allow', 'Deny'] as const
@@ -15,11 +17,31 @@ const SCOPE_TYPES = [
 
 const model = defineModel<PolicyStatementDTO[]>({ required: true })
 
+// 账号组列表（数据范围 group 类型下拉选择；受数据权限过滤，只能选到可见组）
+const groups = ref<Group[]>([])
+
+async function loadGroups() {
+  try {
+    groups.value = await allGroups()
+  } catch {
+    groups.value = []
+  }
+}
+onMounted(loadGroups)
+
+// 下拉无法表达「无选中」时展示的占位组（组已删除但数据里仍引用其 id）
+function groupLabel(id: number | undefined): string {
+  if (id == null) return ''
+  const g = groups.value.find((x) => x.id === id)
+  return g ? `${g.name}${g.display_name && g.display_name !== g.name ? '（' + g.display_name + '）' : ''}` : `组 #${id}（已不可用）`
+}
+
 function newStatement(): PolicyStatementDTO {
   return {
     description: '',
     effect: 'Allow',
     action: '',
+    resource: '*',
     scopes: [],
     sort: 0,
   }
@@ -137,6 +159,18 @@ function toggleCollapse(i: number) {
               />
             </div>
           </div>
+          <div class="space-y-1.5">
+            <label class="text-sm font-medium text-foreground">资源 Resource</label>
+            <input
+              v-model="stmt.resource"
+              type="text"
+              placeholder="如 *（全部资源）或 deptA:account:*（支持通配，默认 *）"
+              class="h-9 w-full rounded-md border border-border bg-background px-3 text-sm font-mono outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+            />
+            <p class="text-xs text-muted-foreground">
+              资源级授权（如按部门区分数据）；留空或 * 表示不限定资源。管理接口仅全资源（*）规则生效。
+            </p>
+          </div>
           <!-- 数据范围（数据权限） -->
           <div class="space-y-2">
             <div class="flex items-center justify-between">
@@ -181,15 +215,25 @@ function toggleCollapse(i: number) {
                 </button>
               </div>
 
-              <!-- group：本用户分组 -->
+              <!-- group：本用户分组（从账号组下拉选择，避免手填 id 出错） -->
               <div v-if="scope.scope_type === 'group'" class="space-y-1.5">
-                <label class="text-xs text-muted-foreground">用户分组 ID（数据记录按分组归属）</label>
-                <input
-                  v-model.number="scope.group_id"
-                  type="number"
-                  placeholder="如 5"
-                  class="h-8 w-full rounded-md border border-border bg-background px-2 text-xs font-mono outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-                />
+                <label class="text-xs text-muted-foreground">用户分组（数据记录按分组归属，多行=多组并集）</label>
+                <select
+                  v-model="scope.group_id"
+                  class="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                >
+                  <option :value="undefined" disabled>请选择账号组</option>
+                  <option
+                    v-for="g in groups"
+                    :key="g.id"
+                    :value="g.id"
+                  >
+                    {{ g.name }}{{ g.display_name && g.display_name !== g.name ? '（' + g.display_name + '）' : '' }}
+                  </option>
+                </select>
+                <p v-if="scope.group_id && !groups.some((g) => g.id === scope.group_id)" class="text-xs text-amber-500">
+                  当前所选分组（{{ groupLabel(scope.group_id) }}）不在可选项内，保存后仍会按该分组过滤，但可能已被删除或无权限。
+                </p>
               </div>
 
               <!-- self：仅本人数据 -->

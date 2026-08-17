@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"time"
 
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/logger"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -19,12 +21,73 @@ import (
 //   - Incr 用事务 + 行级读改写 + 唯一索引兜底（跨驱动无原生原子自增，
 //     用于低频计数足够；高频计数建议用 RedisStore）。
 type DBStore struct {
-	db *gorm.DB
+	db   *gorm.DB
+	stop chan struct{}
+	wg   sync.WaitGroup
+	once sync.Once
 }
 
 // NewDBStore 创建数据库存储。
 func NewDBStore(db *gorm.DB) *DBStore {
-	return &DBStore{db: db}
+	return &DBStore{db: db, stop: make(chan struct{})}
+}
+
+// DefaultCleanupInterval 过期键后台清理周期。
+// 一次性消费键（OAuth 授权码防重放、重用计数、访问令牌黑名单等）TTL 到期后
+// 行记录仍残留表中，须后台周期清理，否则 q_iam_kv_store 会无限膨胀。
+const DefaultCleanupInterval = time.Minute
+
+// StartCleanupLoop 启动过期键后台清理 worker（幂等，重复调用不叠加）。
+// 清理范围：仅带过期时间（expires_at 非空）且已过期的行；不过期的键永不删除。
+func (s *DBStore) StartCleanupLoop(interval time.Duration) {
+	s.once.Do(func() {
+		s.wg.Add(1)
+		go s.cleanupLoop(interval)
+	})
+}
+
+// Close 停止后台清理 worker（幂等）。
+func (s *DBStore) Close() {
+	select {
+	case <-s.stop:
+	default:
+		close(s.stop)
+	}
+	s.wg.Wait()
+}
+
+// cleanupLoop 周期执行过期键清理。
+func (s *DBStore) cleanupLoop(interval time.Duration) {
+	defer s.wg.Done()
+	if interval <= 0 {
+		interval = DefaultCleanupInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+			s.cleanupExpiredAll()
+		}
+	}
+}
+
+// cleanupExpiredAll 批量删除全部已过期的键（后台周期清理）。
+func (s *DBStore) cleanupExpiredAll() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res := s.db.WithContext(ctx).
+		Where("expires_at IS NOT NULL AND expires_at <= ?", time.Now()).
+		Delete(&model.KeyStoreItem{})
+	if res.Error != nil {
+		logger.WarnCtx(ctx, "db store cleanup expired failed", logger.Err(res.Error))
+		return
+	}
+	if res.RowsAffected > 0 {
+		logger.InfoCtx(ctx, "db store cleaned expired keys", logger.Int64("count", res.RowsAffected))
+	}
 }
 
 // nowPtr 返回当前时间指针（用于写入过期时间）。

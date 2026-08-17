@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"chihqiang/q-iam/config"
+	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
 	"github.com/chihqiang/infra-go/hash"
@@ -213,4 +214,97 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 	if err := svc.Logout(ctx, "invalid-token-string"); err != nil {
 		t.Fatalf("logout with invalid token should be idempotent, got %v", err)
 	}
+}
+
+// TestRefreshTokenReuseGraceWindow 验证重用连坐的时间窗缓冲：
+// 注入计数存储后，时间窗内第一次重放只失败本次（不吊销全部），
+// 第二次重放才触发连坐吊销全部；未注入计数存储时保持保守立即连坐。
+func TestRefreshTokenReuseGraceWindow(t *testing.T) {
+	svc, db, acct := newTestAuthLogic(t)
+	ctx := context.Background()
+
+	// 注入账号缓存/计数后端（DBStore，模拟生产装配），重用时间窗依赖计数存储
+	if err := db.AutoMigrate(&model.KeyStoreItem{}); err != nil {
+		t.Fatalf("migrate keystore: %v", err)
+	}
+	svc.SetAccountCache(store.NewDBStore(db))
+
+	resp, err := svc.Login(ctx, &LoginRequest{AccountName: acct.AccountName, Password: "Password123"}, "127.0.0.1", "go-test")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	oldRefresh := resp.RefreshToken
+
+	// 刷新一次：旧令牌被轮换
+	resp2, err := svc.Refresh(ctx, &RefreshRequest{RefreshToken: oldRefresh}, "127.0.0.1", "go-test")
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// 第一次重放旧令牌：失败本次，但时间窗内不连坐，新会话仍有效
+	if _, err := svc.Refresh(ctx, &RefreshRequest{RefreshToken: oldRefresh}, "127.0.0.1", "go-test"); err == nil {
+		t.Fatal("reusing rotated refresh token should fail")
+	}
+	if n := countActiveTokens(t, db, acct.ID); n != 1 {
+		t.Fatalf("first reuse within grace window should NOT revoke all, expected 1 active, got %d", n)
+	}
+
+	// 第二次重放（同一时间窗内）：触发连坐，吊销全部
+	if _, err := svc.Refresh(ctx, &RefreshRequest{RefreshToken: oldRefresh}, "127.0.0.1", "go-test"); err == nil {
+		t.Fatal("reuse should fail")
+	}
+	if n := countActiveTokens(t, db, acct.ID); n != 0 {
+		t.Fatalf("second reuse within window should revoke all, expected 0 active, got %d", n)
+	}
+
+	// 被连坐吊销的新令牌也失效
+	if _, err := svc.Refresh(ctx, &RefreshRequest{RefreshToken: resp2.RefreshToken}, "127.0.0.1", "go-test"); err == nil {
+		t.Fatal("refresh token revoked by reuse detection should fail")
+	}
+}
+
+// TestAccessTokenRevocation 验证访问令牌撤销黑名单：
+// 登录签发的 access token 携带 jti，RevokeAccessToken 后 IsAccessTokenRevoked 命中，
+// 且无效/过期令牌撤销静默忽略（幂等）。
+func TestAccessTokenRevocation(t *testing.T) {
+	svc, db, acct := newTestAuthLogic(t)
+	ctx := context.Background()
+
+	if err := db.AutoMigrate(&model.KeyStoreItem{}); err != nil {
+		t.Fatalf("migrate keystore: %v", err)
+	}
+	kv := store.NewDBStore(db)
+	svc.SetBlacklistStore(kv)
+
+	resp, err := svc.Login(ctx, &LoginRequest{AccountName: acct.AccountName, Password: "Password123"}, "127.0.0.1", "go-test")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if resp.AccessToken == "" {
+		t.Fatal("login missing access token")
+	}
+
+	// 未吊销前不命中
+	claims, err := svc.j.ParseAccessToken(resp.AccessToken)
+	if err != nil {
+		t.Fatalf("parse access token: %v", err)
+	}
+	jti, _ := claims[jwt.ClaimKeyJWTID].(string)
+	if jti == "" {
+		t.Fatal("access token should carry jti")
+	}
+	if svc.IsAccessTokenRevoked(ctx, jti) {
+		t.Fatal("access token should not be revoked initially")
+	}
+
+	// 吊销后命中
+	svc.RevokeAccessToken(ctx, resp.AccessToken)
+	if !svc.IsAccessTokenRevoked(ctx, jti) {
+		t.Fatal("access token should be revoked after RevokeAccessToken")
+	}
+
+	// 幂等：重复吊销、无效令牌、过期令牌均不报错
+	svc.RevokeAccessToken(ctx, resp.AccessToken)
+	svc.RevokeAccessToken(ctx, "not-a-valid-token")
+	svc.RevokeAccessToken(ctx, "")
 }

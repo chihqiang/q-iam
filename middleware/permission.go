@@ -12,13 +12,13 @@ import (
 // Permission 权限校验中间件（动作级）。
 // 校验当前登录账号是否拥有指定 action 的权限。
 //
-// adminAccountName：内置超级管理员账号名（model.AdminAccountName，拥有全部权限，跳过校验），为空则全部账号都需校验。
+// 超级管理员（model.Account.IsAdmin=true，内置 admin）拥有全部权限，跳过校验。
 //
 // 用法：
 //
-//	perm := middleware.Permission(permLogic, "iam:grant", model.AdminAccountName)
+//	perm := middleware.Permission(permLogic, "iam:grant")
 //	authed.AddRoutes([]httpx.Route{{...}}, httpx.WithMiddleware(perm))
-func Permission(permLogic *logic.PermissionLogic, action, adminAccountName string) httpx.Middleware {
+func Permission(permLogic *logic.PermissionLogic, action string) httpx.Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			account := AccountFromContext(r.Context())
@@ -27,8 +27,8 @@ func Permission(permLogic *logic.PermissionLogic, action, adminAccountName strin
 				return
 			}
 
-			// 超级管理员放行
-			if adminAccountName != "" && account.AccountName == adminAccountName {
+			// 超级管理员放行（基于模型 IsAdmin 标志，而非账号名）
+			if account.IsAdmin {
 				if !account.Status {
 					httpx.WriteHTTPErrorCtx(r.Context(), w, httpx.CodeForbidden, "账号已被禁用")
 					return

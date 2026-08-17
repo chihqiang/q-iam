@@ -87,13 +87,20 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, resp)
 }
 
-// Logout 主动退出（吊销当前会话的刷新令牌）。
+// Logout 主动退出（吊销当前会话的刷新令牌 + 访问令牌）。
 // 公开接口：只需携带 refresh_token，access token 已过期时也能正常退出。
+// 同时从 Authorization header 提取 access token 加入撤销黑名单，
+// 使已登出会话的访问令牌立即失效（不再依赖自然过期）。
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req logic.RefreshRequest
 	if err := httpx.MustBindJSON(w, r, &req); err != nil {
 		return
+	}
+
+	// 吊销当前会话的 access token（幂等：无效/过期/无 jti 静默忽略）
+	if tok := middleware.BearerToken(r); tok != "" {
+		h.svc.RevokeAccessToken(ctx, tok)
 	}
 
 	if err := h.svc.Logout(ctx, req.RefreshToken); err != nil {

@@ -3,8 +3,9 @@ package model
 import "time"
 
 // AdminAccountName 内置超级管理员账号名。
-// 该账号拥有全部权限（权限中间件按账号名放行）、不可删除（删除保护），
-// 由 db.Migrate 种子数据创建。全包统一引用此常量，避免硬编码字符串分散。
+// 该账号在种子数据中创建并被标记为超级管理员（IsAdmin=true）：拥有全部权限
+// （权限中间件按 IsAdmin 放行）、不可删除（删除保护）。
+// 全包统一引用此常量，避免硬编码字符串分散。
 const AdminAccountName = "admin"
 
 // Account 账号（RAM 账号），身份管理核心实体。
@@ -18,6 +19,10 @@ type Account struct {
 	Mobile   *string `json:"mobile" gorm:"size:32;uniqueIndex;comment:手机号"`
 	Password string  `json:"-" gorm:"size:256;not null;comment:密码（Bcrypt）"`
 	Status   bool    `json:"status" gorm:"default:true;comment:状态（启用/禁用）"`
+	// IsAdmin 是否超级管理员（内置 admin 为 true）。拥有全部权限、不可删除。
+	// 仅由种子数据/迁移补丁标记，API 不可修改（AccountCreate/UpdateRequest 不含该字段）。
+	// 替代按账号名（AccountName==admin）硬编码判断，避免账号名可变/被同名伪造的边界风险。
+	IsAdmin bool `json:"is_admin" gorm:"default:false;comment:是否超级管理员"`
 	// AllowConsole 是否允许进入管理控制台。注册账号为 false（仅用于 OAuth2 授权登录）；
 	// 管理员创建的账号默认 true（在创建逻辑中显式赋值，避免 GORM bool 零值被忽略）。
 	AllowConsole bool       `json:"allow_console" gorm:"comment:是否允许进入控制台"`

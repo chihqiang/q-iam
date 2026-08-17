@@ -56,7 +56,7 @@ func (h *GrantHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, nil)
 }
 
-// ListByPrincipal 查询主体已绑定的策略。
+// ListByPrincipal 查询主体已绑定的策略（按数据范围过滤）。
 func (h *GrantHandler) ListByPrincipal(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	principalType := model.PrincipalType(r.PathValue("type"))
@@ -66,7 +66,7 @@ func (h *GrantHandler) ListByPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policies, err := h.svc.ListByPrincipal(ctx, principalType, principalID)
+	policies, err := h.svc.ListByPrincipal(ctx, accountIDForScope(ctx), principalType, principalID)
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -74,7 +74,7 @@ func (h *GrantHandler) ListByPrincipal(w http.ResponseWriter, r *http.Request) {
 	httpx.OkJSONCtx(ctx, w, policies)
 }
 
-// ListPrincipals 查询策略被哪些主体绑定。
+// ListPrincipals 查询策略被哪些主体绑定（按数据范围过滤）。
 func (h *GrantHandler) ListPrincipals(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	policyID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -83,7 +83,7 @@ func (h *GrantHandler) ListPrincipals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	attachments, err := h.svc.ListPrincipals(ctx, policyID)
+	attachments, err := h.svc.ListPrincipals(ctx, accountIDForScope(ctx), policyID)
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return

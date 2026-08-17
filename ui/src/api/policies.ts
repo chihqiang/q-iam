@@ -26,6 +26,8 @@ export interface PolicyStatementDTO {
   description?: string
   effect: 'Allow' | 'Deny'
   action: string
+  // 资源（支持 * 通配，默认 * 表示全部资源）
+  resource?: string
   // 数据范围（数据权限）
   scopes: PolicyScopeDTO[]
   sort: number

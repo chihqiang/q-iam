@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,11 @@ type AuthLogic struct {
 	// 供 GetAccountByID（认证中间件加载账号）使用：账号信息变更不频繁，短 TTL 缓存
 	// 可显著减少认证路径的 DB 查询。账号变更点（禁用/删除/改密）须主动失效。
 	accountStore store.KVStore
+
+	// blacklistStore 访问令牌撤销黑名单后端（注入 store.KVStore 接口，nil 表示不启用）。
+	// 登出时把当前 access token 的 jti 写入黑名单（TTL=令牌剩余有效期），
+	// Auth 中间件校验黑名单，使已登出会话的访问令牌立即失效（不再依赖自然过期）。
+	blacklistStore store.KVStore
 
 	// loginLimiter 登录全局限流（ratelimit.Limiter 接口，默认内存令牌桶；
 	// 配置 Redis 后由 main 注入 RedisTokenBucket，实现多节点共享），
@@ -91,6 +97,51 @@ func (s *AuthLogic) SetOAuthLogic(o *OAuthLogic) {
 // nil 表示不缓存。账号缓存短 TTL（accountCacheTTL），账号变更通过 InvalidateAccountCache 主动失效。
 func (s *AuthLogic) SetAccountCache(st store.KVStore) {
 	s.accountStore = st
+}
+
+// SetBlacklistStore 注入访问令牌撤销黑名单后端（复用 store.KVStore：默认 DBStore，
+// 配置 Redis 后为 RedisStore）。nil 表示不启用访问令牌撤销。
+func (s *AuthLogic) SetBlacklistStore(st store.KVStore) {
+	s.blacklistStore = st
+}
+
+// accessTokenRevokedKey 访问令牌撤销黑名单键（按 jti 唯一标识）。
+func accessTokenRevokedKey(jti string) string {
+	return "oauth:access:revoked:" + jti
+}
+
+// RevokeAccessToken 将访问令牌加入撤销黑名单（登出时吊销当前会话的 access token）。
+// 解析令牌提取 jti，TTL 设为令牌剩余有效期，过期自动释放（黑名单不长期累积）；
+// 令牌无效/已过期/缺少 jti 或未启用黑名单时静默忽略（幂等）。
+func (s *AuthLogic) RevokeAccessToken(ctx context.Context, accessToken string) {
+	if s.blacklistStore == nil || accessToken == "" {
+		return
+	}
+	claims, err := s.j.ParseAccessToken(accessToken)
+	if err != nil {
+		return
+	}
+	jti, _ := claims[jwt.ClaimKeyJWTID].(string)
+	if jti == "" {
+		return
+	}
+	exp, _ := claims[jwt.ClaimKeyExpirationTime].(float64)
+	ttl := time.Until(time.Unix(int64(exp), 0))
+	if ttl <= 0 {
+		return
+	}
+	if _, err := s.blacklistStore.SetNX(ctx, accessTokenRevokedKey(jti), "1", ttl); err != nil {
+		logger.WarnCtx(ctx, "revoke access token failed", logger.Err(err))
+	}
+}
+
+// IsAccessTokenRevoked 判断访问令牌 jti 是否已被吊销（Auth 中间件校验黑名单）。
+func (s *AuthLogic) IsAccessTokenRevoked(ctx context.Context, jti string) bool {
+	if s.blacklistStore == nil || jti == "" {
+		return false
+	}
+	v, err := s.blacklistStore.Get(ctx, accessTokenRevokedKey(jti))
+	return err == nil && v != ""
 }
 
 // accountCacheTTL 账号信息缓存有效期。账号变更会主动失效，TTL 作为兜底。
@@ -236,16 +287,28 @@ func (s *AuthLogic) Login(ctx context.Context, req *LoginRequest, clientIP, user
 // db 可传事务（刷新时与旧记录消费同一事务，保证签发与吊销一致）。
 func (s *AuthLogic) issueTokenPair(ctx context.Context, db *gorm.DB, claims jwt.Claims, accountID int64, clientIP, userAgent string) (*jwt.TokenPair, error) {
 	now := time.Now()
-	jti := uuid.NewString()
 
-	// 深拷贝 claims，仅 refresh 携带 jti（避免 access 也带上唯一标识）
+	// access 与 refresh 各带独立 jti：
+	//  - refresh 的 jti 是刷新令牌表主键（token_id），用于轮换/吊销；
+	//  - access 的 jti 用于访问令牌撤销黑名单：登出时吊销当前 access token，
+	//    Auth 中间件校验黑名单使已登出会话的访问令牌立即失效。
+	accessJTI := uuid.NewString()
+	refreshJTI := uuid.NewString()
+
+	// 深拷贝 claims，access / refresh 各自携带独立 jti
+	accessClaims := make(jwt.Claims, len(claims)+1)
+	for k, v := range claims {
+		accessClaims[k] = v
+	}
+	accessClaims[jwt.ClaimKeyJWTID] = accessJTI
+
 	refreshClaims := make(jwt.Claims, len(claims)+1)
 	for k, v := range claims {
 		refreshClaims[k] = v
 	}
-	refreshClaims[jwt.ClaimKeyJWTID] = jti
+	refreshClaims[jwt.ClaimKeyJWTID] = refreshJTI
 
-	accessToken, err := s.j.GenerateAccessToken(claims)
+	accessToken, err := s.j.GenerateAccessToken(accessClaims)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +319,7 @@ func (s *AuthLogic) issueTokenPair(ctx context.Context, db *gorm.DB, claims jwt.
 
 	// 落库刷新令牌记录（表存储，供轮换/吊销）
 	rt := model.RefreshToken{
-		TokenID:   jti,
+		TokenID:   refreshJTI,
 		AccountID: accountID,
 		ExpiresAt: now.Add(s.j.Config().RefreshTokenExpire),
 		ClientIP:  clientIP,
@@ -283,6 +346,34 @@ func revokeAccountTokens(ctx context.Context, db *gorm.DB, accountID int64, reas
 			"revoked_at":    &revokedAt,
 			"revoke_reason": reason,
 		}).Error
+}
+
+// 刷新令牌重用连坐时间窗：短时间内连续多次检测到重用才吊销全部（防误伤）。
+const (
+	// reuseGraceWindow 重用计数时间窗（固定窗口，首次检测后 TTL 到期自动重置）。
+	reuseGraceWindow = 30 * time.Second
+	// reuseGraceThreshold 时间窗内触发连坐（吊销全部）的重用次数阈值。
+	reuseGraceThreshold = 2
+)
+
+// reuseCounterKey 账号刷新令牌重用计数键。
+func reuseCounterKey(accountID int64) string {
+	return "oauth:refresh:reuse:" + strconv.FormatInt(accountID, 10)
+}
+
+// shouldRevokeAllOnReuse 判断是否应吊销该账号全部刷新令牌（重用连坐）。
+// 时间窗内累计重用次数达到阈值才连坐；存储后端不可用时保守回退为立即连坐。
+func (s *AuthLogic) shouldRevokeAllOnReuse(ctx context.Context, accountID int64) bool {
+	if s.accountStore == nil {
+		return true
+	}
+	n, err := s.accountStore.Incr(ctx, reuseCounterKey(accountID), reuseGraceWindow)
+	if err != nil {
+		logger.WarnCtx(ctx, "reuse counter failed, fallback to revoke all",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		return true
+	}
+	return n >= reuseGraceThreshold
 }
 
 // cleanBusinessClaims 从解析出的令牌声明中提取业务字段（移除标准声明与 jti/token_type）。
@@ -476,13 +567,20 @@ func (s *AuthLogic) Refresh(ctx context.Context, req *RefreshRequest, clientIP, 
 		return nil, err
 	}
 
-	// 重用检测（事务已提交）：疑似盗用，吊销该账号全部刷新令牌
+	// 重用检测（事务已提交）：疑似盗用。
+	// 连坐加时间窗缓冲：短时间内连续多次重用才吊销该账号全部刷新令牌，
+	// 偶发一次（客户端弱网重试/并发刷新竞态）只失败本次，不误伤其他设备会话。
 	if reuseDetected {
-		logger.WarnCtx(ctx, "refresh token reuse detected, revoke all",
-			logger.Int64("account_id", accountID))
-		if err := revokeAccountTokens(ctx, s.db, accountID, model.RefreshTokenRevokeReuse); err != nil {
-			logger.ErrorCtx(ctx, "revoke all refresh tokens failed",
-				logger.Err(err), logger.Int64("account_id", accountID))
+		if s.shouldRevokeAllOnReuse(ctx, accountID) {
+			logger.WarnCtx(ctx, "refresh token reuse detected, revoke all",
+				logger.Int64("account_id", accountID))
+			if err := revokeAccountTokens(ctx, s.db, accountID, model.RefreshTokenRevokeReuse); err != nil {
+				logger.ErrorCtx(ctx, "revoke all refresh tokens failed",
+					logger.Err(err), logger.Int64("account_id", accountID))
+			}
+		} else {
+			logger.InfoCtx(ctx, "refresh token reuse within grace window, skip revoke-all",
+				logger.Int64("account_id", accountID))
 		}
 		return nil, errors.New("刷新令牌无效或已过期")
 	}

@@ -133,10 +133,23 @@ func (s *GrantLogic) Revoke(ctx context.Context, req *RevokeRequest) error {
 	return nil
 }
 
-// ListByPrincipal 查询某主体已绑定的策略。
-func (s *GrantLogic) ListByPrincipal(ctx context.Context, principalType model.PrincipalType, principalID int64) ([]model.Policy, error) {
+// ListByPrincipal 查询某主体已绑定的策略（按数据范围过滤主体可见性）。
+// viewerID<=0（admin/系统主体）不限制；否则当前账号不可见该主体时返回空集，
+// 防止越权查看不可见账号/账号组/应用的授权关系。
+func (s *GrantLogic) ListByPrincipal(ctx context.Context, viewerID int64, principalType model.PrincipalType, principalID int64) ([]model.Policy, error) {
 	if !principalType.Valid() {
 		return nil, errors.New("无效的主体类型")
+	}
+
+	// 数据范围过滤：当前账号不可见该主体 → 返回空集
+	if s.permLogic != nil {
+		ok, err := s.permLogic.CanAccessPrincipal(ctx, viewerID, principalType, principalID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return []model.Policy{}, nil
+		}
 	}
 
 	var policies []model.Policy
@@ -150,14 +163,46 @@ func (s *GrantLogic) ListByPrincipal(ctx context.Context, principalType model.Pr
 	return policies, err
 }
 
-// ListPrincipals 查询某策略被哪些主体绑定。
-func (s *GrantLogic) ListPrincipals(ctx context.Context, policyID int64) ([]model.PolicyAttachment, error) {
+// ListPrincipals 查询某策略被哪些主体绑定（按数据范围过滤策略与主体可见性）。
+// viewerID<=0（admin/系统主体）不限制；否则：
+//   - 当前账号不可见该策略 → 返回空集；
+//   - 返回的主体列表仅保留当前账号可见的主体，防止通过授权关系枚举越权主体。
+func (s *GrantLogic) ListPrincipals(ctx context.Context, viewerID int64, policyID int64) ([]model.PolicyAttachment, error) {
+	// 策略可见性：当前账号不可见该策略 → 返回空集
+	if s.permLogic != nil {
+		ok, err := s.permLogic.CanAccessPolicy(ctx, viewerID, policyID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return []model.PolicyAttachment{}, nil
+		}
+	}
+
 	var attachments []model.PolicyAttachment
 	err := s.db.WithContext(ctx).
 		Where("policy_id = ?", policyID).
 		Order("id ASC").
 		Find(&attachments).Error
-	return attachments, err
+	if err != nil {
+		return nil, err
+	}
+
+	// 主体可见性过滤：仅保留当前账号可见的主体
+	if s.permLogic != nil && viewerID > 0 {
+		filtered := attachments[:0]
+		for _, a := range attachments {
+			ok, err := s.permLogic.CanAccessPrincipal(ctx, viewerID, a.PrincipalType, a.PrincipalID)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				filtered = append(filtered, a)
+			}
+		}
+		attachments = filtered
+	}
+	return attachments, nil
 }
 
 // ensurePrincipal 校验主体是否存在。

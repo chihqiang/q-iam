@@ -7,6 +7,7 @@ package svc
 
 import (
 	"fmt"
+	"strings"
 
 	"chihqiang/q-iam/config"
 	"chihqiang/q-iam/db"
@@ -38,6 +39,9 @@ type ServiceContext struct {
 	Cipher      *logic.Cipher
 	KVStore     store.KVStore
 	RedisClient redis.UniversalClient
+	// KVStoreCloser KVStore 后台生命周期管理（DBStore 过期键清理 worker；
+	// RedisStore 键自过期无需清理，配置 Redis 时置 nil）。
+	KVStoreCloser *store.DBStore
 
 	// 业务逻辑层
 	AuthLogic       *logic.AuthLogic
@@ -55,12 +59,23 @@ type ServiceContext struct {
 // NewServiceContext 装配并返回服务上下文。
 // 任一依赖初始化失败都会返回错误，由调用方决定终止启动。
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
+	// SQLite：通过 DSN 参数 _busy_timeout 让连接池中每个新建连接都带 busy_timeout。
+	// 仅对单个连接 Exec `PRAGMA busy_timeout` 不生效于连接池其他连接，
+	// 并发写（业务 + 审计批量落库）时未设置该 PRAGMA 的连接会立即报 "database is locked"。
+	if c.DB.Driver == "sqlite" && !strings.Contains(c.DB.Database, ":memory:") && !strings.Contains(c.DB.Database, "_busy_timeout") {
+		sep := "?"
+		if strings.Contains(c.DB.Database, "?") {
+			sep = "&"
+		}
+		c.DB.Database += sep + "_busy_timeout=5000"
+	}
+
 	gormDB, err := orm.New(c.DB)
 	if err != nil {
 		return nil, fmt.Errorf("数据库连接失败: %w", err)
 	}
 
-	// SQLite：设置 busy_timeout 避免写冲突时立即报错
+	// SQLite：对已建立的连接也设置 busy_timeout（DSN 参数仅对后续新建连接生效）
 	if c.DB.Driver == "sqlite" {
 		gormDB.Exec("PRAGMA busy_timeout = 5000")
 	}
@@ -109,7 +124,12 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	// 通用键值存储（缓存 / 一次性消费 / 计数等场景的后端抽象）：
 	// 默认用数据库表（DBStore，多节点共享）；配置 Redis 后自动切换 RedisStore。
-	ctx.KVStore = store.NewDBStore(gormDB)
+	// DBStore 启动后台过期清理 worker：一次性消费键（OAuth 授权码防重放、重用计数、
+	// 访问令牌黑名单等）TTL 到期后行残留，须周期清理，否则表无限膨胀。
+	dbStore := store.NewDBStore(gormDB)
+	dbStore.StartCleanupLoop(store.DefaultCleanupInterval)
+	ctx.KVStore = dbStore
+	ctx.KVStoreCloser = dbStore
 	if c.Redis.Addr != "" {
 		rc, err := redisx.New(c.Redis)
 		if err != nil {
@@ -117,7 +137,13 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		}
 		ctx.RedisClient = rc.Client()
 		ctx.KVStore = store.NewRedisStore(ctx.RedisClient, c.Redis.KeyPrefix)
+		ctx.KVStoreCloser = nil // Redis 键自过期，无需后台清理
 		logger.Infof("Redis 存储已启用: %s", c.Redis.Addr)
+	} else {
+		// 多实例部署语义加固：限流/缓存/审计在无 Redis 时均为单进程实现，
+		// 多节点部署会被静默弱化（限流被节点数稀释、审计分散、缓存失效不跨节点）。
+		// 显式告警，避免把「Redis 可选」误读为「可随意多开」。
+		logger.Warnf("未配置 Redis：限流/缓存/审计为进程内实现，多实例部署将弱化安全语义（限流被节点数稀释、审计分散、缓存失效不跨节点），生产多实例部署请配置 Redis")
 	}
 
 	// 权限逻辑（加载账号/角色的权限集合，供中间件与各 handler 使用）
@@ -128,6 +154,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 账号信息缓存（认证中间件加载账号用）：复用 KVStore（DBStore/RedisStore），
 	// 账号变更（禁用/删除/改密）通过 AccountLogic 注入的失效器主动失效。
 	ctx.AuthLogic.SetAccountCache(ctx.KVStore)
+	// 访问令牌撤销黑名单（登出时吊销当前 access token）：复用 KVStore
+	ctx.AuthLogic.SetBlacklistStore(ctx.KVStore)
 
 	// 配置 Redis 后，登录/注册/刷新全局限流切换到 Redis 分布式实现（多节点共享限流）
 	if ctx.RedisClient != nil {
@@ -165,6 +193,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 历史数据清理（管理控制台手动触发，清理 days 天以前的数据）
 	ctx.CleanupLogic = logic.NewCleanupLogic(gormDB)
 
+	// 应用列表按数据范围过滤（iam:app:read）
+	ctx.AppLogic.SetPermissionLogic(ctx.PermissionLogic)
+
 	// OAuth UserInfo 需要加载用户权限
 	ctx.OAuthLogic.SetPermissionLogic(ctx.PermissionLogic)
 
@@ -180,9 +211,13 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 }
 
 // Close 释放服务运行期资源（服务退出时调用）：
+//   - 停止 DBStore 过期键清理 worker（若启用）；
 //   - 停止审计落库 worker 并排空队列，避免丢失已入队日志；
 //   - 关闭 Redis 连接（若已启用）。
 func (s *ServiceContext) Close() {
+	if s.KVStoreCloser != nil {
+		s.KVStoreCloser.Close()
+	}
 	if s.AuditLogic != nil {
 		s.AuditLogic.Close()
 	}

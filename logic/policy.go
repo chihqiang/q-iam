@@ -37,8 +37,10 @@ type PolicyListRequest struct {
 	Key    string `form:"key"`
 }
 
-// List 策略分页列表。
-func (s *PolicyLogic) List(ctx context.Context, req *PolicyListRequest) (*PageResponse[model.Policy], error) {
+// List 策略分页列表（按数据权限过滤可见范围）。
+// accountID<=0（admin/系统主体）不过滤；否则按该账号对 iam:policy:read 的
+// 数据范围过滤（self=本人创建，group=绑定到可见组的策略）。
+func (s *PolicyLogic) List(ctx context.Context, accountID int64, req *PolicyListRequest) (*PageResponse[model.Policy], error) {
 	var policies []model.Policy
 	var total int64
 
@@ -54,6 +56,9 @@ func (s *PolicyLogic) List(ctx context.Context, req *PolicyListRequest) (*PageRe
 		query = query.Where("name LIKE ? OR description LIKE ?", like, like)
 	}
 
+	// 数据范围过滤（非 admin 账号按 iam:policy:read 的数据范围可见性过滤）
+	s.applyPolicyScope(ctx, query, accountID)
+
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
 	}
@@ -66,11 +71,67 @@ func (s *PolicyLogic) List(ctx context.Context, req *PolicyListRequest) (*PageRe
 	return &PageResponse[model.Policy]{Data: policies, Total: total}, nil
 }
 
+// applyPolicyScope 按当前账号对策略资源（iam:policy:read）的数据范围过滤查询。
+// accountID<=0 或权限逻辑未注入时不过滤（全量）。数据范围加载失败时保守降级为仅本人创建。
+// 语义：
+//   - all/未限定 → 全量；
+//   - self → 仅本人创建的策略（created_by=本人）；
+//   - group → 绑定到指定组的策略（q_iam_policy_attachments 中 principal_type=group）；
+//   - attribute → 已降级为 self。
+func (s *PolicyLogic) applyPolicyScope(ctx context.Context, query *gorm.DB, accountID int64) {
+	if accountID <= 0 || s.permLogic == nil {
+		return
+	}
+	policyTable := model.Policy{}.TableName() // q_iam_policies
+
+	scope, err := s.permLogic.DataScopeForAction(ctx, "iam:policy:read", accountID)
+	if err != nil {
+		logger.WarnCtx(ctx, "load policy data scope failed, fallback to self",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		query.Where(policyTable+".created_by = ?", accountID)
+		return
+	}
+	if scope.All {
+		return
+	}
+
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if scope.SelfOnly {
+		conds = append(conds, policyTable+".created_by = ?")
+		args = append(args, accountID)
+	}
+	if len(scope.GroupIDs) > 0 {
+		// 绑定到可见组的策略（组授权影响组内账号，策略可视为组的数据）
+		conds = append(conds, "EXISTS (SELECT 1 FROM q_iam_policy_attachments pa WHERE pa.policy_id = "+policyTable+".id AND pa.principal_type = 'group' AND pa.principal_id IN ?)")
+		args = append(args, scope.GroupIDs)
+	}
+	if len(conds) == 0 {
+		query.Where("1 = 0")
+		return
+	}
+	query.Where(strings.Join(conds, " OR "), args...)
+}
+
 // AllList 全部启用的策略（用于授权选择）。
-func (s *PolicyLogic) AllList(ctx context.Context) ([]model.Policy, error) {
+// accountID<=0 返回全部；否则按数据范围过滤，防止下拉选择越权策略。
+func (s *PolicyLogic) AllList(ctx context.Context, accountID int64) ([]model.Policy, error) {
 	var policies []model.Policy
-	err := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC").Find(&policies).Error
+	query := s.db.WithContext(ctx).Where("status = ?", true).Order("id ASC")
+	s.applyPolicyScope(ctx, query, accountID)
+	err := query.Find(&policies).Error
 	return policies, err
+}
+
+// CanViewPolicy 判断账号 viewerID 是否有权查看策略 targetID 的详情。
+// 委托 PermissionLogic.CanAccessPolicy 基于 iam:policy:read 数据范围判定。
+// 供详情接口做数据范围校验，防止「列表已过滤但详情接口按 ID 枚举绕过」越权。
+// 权限逻辑未注入时保守拒绝（返回 false）。
+func (s *PolicyLogic) CanViewPolicy(ctx context.Context, viewerID, targetID int64) (bool, error) {
+	if s.permLogic == nil {
+		return false, nil
+	}
+	return s.permLogic.CanAccessPolicy(ctx, viewerID, targetID)
 }
 
 // GetByID 策略详情（含授权规则主从表）。
@@ -97,6 +158,8 @@ type PolicyStatementDTO struct {
 	Effect string `json:"effect"`
 	// Action 操作（逗号分隔）。
 	Action string `json:"action"`
+	// Resource 资源（支持 * 通配，默认 * 表示全部资源）。
+	Resource string `json:"resource"`
 	// Scopes 数据范围明细（数据权限）。
 	Scopes []PolicyScopeDTO `json:"scopes"`
 	// Sort 排序。
@@ -335,7 +398,7 @@ func deletePolicyStatements(tx *gorm.DB, policyID int64) error {
 func validateStatements(dtos []PolicyStatementDTO) error {
 	for i, sd := range dtos {
 		effect := strings.ToUpper(strings.TrimSpace(sd.Effect))
-		if effect != "Allow" && effect != "Deny" {
+		if effect != "ALLOW" && effect != "DENY" {
 			return fmt.Errorf("第 %d 条规则的 effect 必须为 Allow 或 Deny", i+1)
 		}
 		if strings.TrimSpace(sd.Action) == "" {
@@ -364,6 +427,15 @@ func validateStatements(dtos []PolicyStatementDTO) error {
 	return nil
 }
 
+// normalizeResource 资源字段归一化：去空格，空视为 *（全部资源）。
+func normalizeResource(r string) string {
+	r = strings.TrimSpace(r)
+	if r == "" {
+		return "*"
+	}
+	return r
+}
+
 // buildStatements 构建策略的授权规则明细（Effect/Action 归一化：去空格 + 统一大写）。
 func buildStatements(dtos []PolicyStatementDTO, policy *model.Policy) {
 	for i, sd := range dtos {
@@ -371,6 +443,7 @@ func buildStatements(dtos []PolicyStatementDTO, policy *model.Policy) {
 			Description: sd.Description,
 			Effect:      strings.ToUpper(strings.TrimSpace(sd.Effect)),
 			Action:      strings.TrimSpace(sd.Action),
+			Resource:    normalizeResource(sd.Resource),
 			Sort:        sd.Sort,
 		}
 		if statement.Sort == 0 {

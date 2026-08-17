@@ -185,6 +185,8 @@ func (o *OAuthLogic) IssueToken(ctx context.Context, req *TokenRequest) (*TokenR
 	}
 
 	claims := jwt.Claims{}
+	// 访问令牌携带唯一 jti，供撤销黑名单（登出/安全吊销等场景吊销当前令牌）
+	claims[jwt.ClaimKeyJWTID] = uuid.NewString()
 	scope := req.Scope
 
 	// 两种模式都记录应用 ID 与主体类型，供 UserInfo Endpoint 识别

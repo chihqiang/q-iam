@@ -71,6 +71,7 @@ func seed(db *gorm.DB) error {
 			Email:             ptrString("admin@local"),
 			Password:          password,
 			Status:            true,
+			IsAdmin:           true,
 			AllowConsole:      true,
 			Remark:            "内置超级管理员",
 			PasswordChangedAt: &now,

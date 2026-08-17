@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
 	"chihqiang/q-iam/logic"
+	"chihqiang/q-iam/middleware"
 
 	"github.com/chihqiang/infra-go/httpx"
 )
@@ -19,6 +21,16 @@ func NewAccountHandler(svc *logic.AccountLogic) *AccountHandler {
 	return &AccountHandler{svc: svc}
 }
 
+// accountIDForScope 返回数据范围过滤用的账号主体 ID：
+// 超级管理员（model.Account.IsAdmin=true）返回 0（全量可见），其余账号返回自身 ID（按权限集数据范围过滤）。
+func accountIDForScope(ctx context.Context) int64 {
+	account := middleware.AccountFromContext(ctx)
+	if account == nil || account.IsAdmin {
+		return 0
+	}
+	return account.ID
+}
+
 // List 账号列表。
 func (h *AccountHandler) List(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -27,7 +39,7 @@ func (h *AccountHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.List(ctx, &req)
+	resp, err := h.svc.List(ctx, accountIDForScope(ctx), &req)
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -38,7 +50,7 @@ func (h *AccountHandler) List(w http.ResponseWriter, r *http.Request) {
 // AllList 全部启用的账号（授权下拉选择用）。
 func (h *AccountHandler) AllList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	accounts, err := h.svc.AllList(ctx)
+	accounts, err := h.svc.AllList(ctx, accountIDForScope(ctx))
 	if err != nil {
 		httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
 		return
@@ -47,12 +59,27 @@ func (h *AccountHandler) AllList(w http.ResponseWriter, r *http.Request) {
 }
 
 // Detail 账号详情。
+// 非 admin 账号按数据范围（self/group）校验可见性，防止越权查看他人账号。
 func (h *AccountHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
+	}
+
+	// 数据范围可见性校验（admin 传 0 全量放行）
+	viewerID := accountIDForScope(ctx)
+	if viewerID > 0 {
+		ok, err := h.svc.CanViewAccount(ctx, viewerID, id)
+		if err != nil {
+			httpx.OkJSONCtx(ctx, w, httpx.NewCodeError(httpx.CodeDefaultError, err.Error()))
+			return
+		}
+		if !ok {
+			httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeForbidden, "无权限访问")
+			return
+		}
 	}
 
 	account, err := h.svc.GetByID(ctx, id)
