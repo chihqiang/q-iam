@@ -12,15 +12,16 @@ import (
 
 // Config 全局配置。
 type Config struct {
-	App      App                `json:"app"`
-	Server   httpx.ServerConfig `json:"server"`
-	DB       orm.Config         `json:"db"`
-	JWT      jwt.Config         `json:"jwt"`
-	Logger   logger.Config      `json:"logger"`
-	Security SecurityConfig     `json:"security"`
-	CORS     CORSConfig         `json:"cors"`
-	Pprof    PprofConfig        `json:"pprof"`
-	Redis    redisx.Config      `json:"redis,optional"`
+	App       App                `json:"app"`
+	Server    httpx.ServerConfig `json:"server"`
+	DB        orm.Config         `json:"db"`
+	Migration MigrationConfig    `json:"migration"`
+	JWT       jwt.Config         `json:"jwt"`
+	Logger    logger.Config      `json:"logger"`
+	Security  SecurityConfig     `json:"security"`
+	CORS      CORSConfig         `json:"cors"`
+	Pprof     PprofConfig        `json:"pprof"`
+	Redis     redisx.Config      `json:"redis,optional"`
 }
 
 // App 应用基础信息。
@@ -106,4 +107,13 @@ type PasswordPolicyConfig struct {
 // PprofConfig pprof 性能分析配置。
 type PprofConfig struct {
 	Enabled bool `json:"enabled,default=false"`
+}
+
+// MigrationConfig 数据库迁移配置。
+type MigrationConfig struct {
+	// AutoMigrate 是否自动迁移表结构（建表/加列等），默认 true。
+	// 关闭时需自行保证表结构已存在（如由外部迁移工具管理）。
+	AutoMigrate bool `json:"auto_migrate,default=true"`
+	// SeedData 是否初始化基础数据（内置 admin 账号、系统内置策略等），默认 true。
+	SeedData bool `json:"seed_data,default=true"`
 }

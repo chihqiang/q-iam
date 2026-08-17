@@ -10,7 +10,6 @@ import (
 
 	"chihqiang/q-iam/config"
 	"chihqiang/q-iam/db"
-	"chihqiang/q-iam/handler"
 	"chihqiang/q-iam/logic"
 	"chihqiang/q-iam/logic/store"
 
@@ -28,7 +27,9 @@ import (
 // 字段按层组织，供路由注册（route）与各中间件直接访问：
 //   - 基础设施层：DB / JWT / Cipher / KVStore / RedisClient
 //   - 业务逻辑层：*Logic（认证、账号、权限等核心逻辑）
-//   - 处理器层：*Handler（HTTP 处理函数，供路由绑定）
+//
+// 处理器层（*Handler）是 HTTP 接口适配层，仅依赖业务逻辑层，
+// 由 route 包在注册路由时统一创建（见 route/handler.go），不在此装配。
 type ServiceContext struct {
 	Config config.Config
 
@@ -49,17 +50,6 @@ type ServiceContext struct {
 	OAuthLogic      *logic.OAuthLogic
 	CleanupLogic    *logic.CleanupLogic
 	PermissionLogic *logic.PermissionLogic
-
-	// 处理器层
-	AuthHandler    *handler.AuthHandler
-	AccountHandler *handler.AccountHandler
-	GroupHandler   *handler.GroupHandler
-	PolicyHandler  *handler.PolicyHandler
-	GrantHandler   *handler.GrantHandler
-	AppHandler     *handler.AppHandler
-	AuditHandler   *handler.AuditHandler
-	OAuthHandler   *handler.OAuthHandler
-	CleanupHandler *handler.CleanupHandler
 }
 
 // NewServiceContext 装配并返回服务上下文。
@@ -78,7 +68,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 配置 GORM 会话：预编译语句
 	gormDB = gormDB.Session(&gorm.Session{PrepareStmt: true})
 
-	if err := db.Migrate(gormDB); err != nil {
+	if err := db.Migrate(gormDB, c.Migration); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
 
@@ -109,15 +99,13 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		Cipher: cipher,
 	}
 
-	// ---- 业务逻辑层与处理器层装配（注入顺序与原先 main.go 保持一致） ----
+	// ---- 业务逻辑层装配（注入顺序与原先 main.go 保持一致） ----
 
 	// 应用凭证与密钥管理
 	ctx.AppLogic = logic.NewAppLogic(gormDB, cipher)
-	ctx.AppHandler = handler.NewAppHandler(ctx.AppLogic)
 
 	// 操作审计（启动落库 worker）
 	ctx.AuditLogic = logic.NewAuditLogic(gormDB)
-	ctx.AuditHandler = handler.NewAuditHandler(ctx.AuditLogic)
 
 	// 通用键值存储（缓存 / 一次性消费 / 计数等场景的后端抽象）：
 	// 默认用数据库表（DBStore，多节点共享）；配置 Redis 后自动切换 RedisStore。
@@ -140,9 +128,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 账号信息缓存（认证中间件加载账号用）：复用 KVStore（DBStore/RedisStore），
 	// 账号变更（禁用/删除/改密）通过 AccountLogic 注入的失效器主动失效。
 	ctx.AuthLogic.SetAccountCache(ctx.KVStore)
-	ctx.AuthHandler = handler.NewAuthHandler(ctx.AuthLogic)
-	// /auth/me 返回当前账号权限，供前端按权限过滤菜单
-	ctx.AuthHandler.SetPermissionLogic(ctx.PermissionLogic)
 
 	// 配置 Redis 后，登录/注册/刷新全局限流切换到 Redis 分布式实现（多节点共享限流）
 	if ctx.RedisClient != nil {
@@ -157,7 +142,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx.OAuthLogic = logic.NewOAuthLogic(gormDB, j)
 	ctx.OAuthLogic.SetConsumedStore(ctx.KVStore)
 	ctx.OAuthLogic.SetAppLogic(ctx.AppLogic)
-	ctx.OAuthHandler = handler.NewOAuthHandler(ctx.OAuthLogic)
 	ctx.AuthLogic.SetOAuthLogic(ctx.OAuthLogic)
 
 	// 配置 Redis 后，应用换取 Token 限流切换到 Redis 分布式实现
@@ -170,21 +154,16 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx.AccountLogic = logic.NewAccountLogic(gormDB, passwordValidator)
 	// 账号变更（禁用/删除/改密/重置密码）后失效认证中间件的账号缓存（AuthLogic 实现）
 	ctx.AccountLogic.SetCacheInvalidator(ctx.AuthLogic)
-	ctx.AccountHandler = handler.NewAccountHandler(ctx.AccountLogic)
 
 	// 账号组 / 权限策略 / 授权 / 历史数据清理
 	ctx.GroupLogic = logic.NewGroupLogic(gormDB)
-	ctx.GroupHandler = handler.NewGroupHandler(ctx.GroupLogic)
 
 	ctx.PolicyLogic = logic.NewPolicyLogic(gormDB)
-	ctx.PolicyHandler = handler.NewPolicyHandler(ctx.PolicyLogic)
 
 	ctx.GrantLogic = logic.NewGrantLogic(gormDB)
-	ctx.GrantHandler = handler.NewGrantHandler(ctx.GrantLogic)
 
 	// 历史数据清理（管理控制台手动触发，清理 days 天以前的数据）
 	ctx.CleanupLogic = logic.NewCleanupLogic(gormDB)
-	ctx.CleanupHandler = handler.NewCleanupHandler(ctx.CleanupLogic)
 
 	// OAuth UserInfo 需要加载用户权限
 	ctx.OAuthLogic.SetPermissionLogic(ctx.PermissionLogic)

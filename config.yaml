@@ -26,6 +26,11 @@ db:
   # conn_max_lifetime: 30m
   # conn_max_idle_time: 10m
 
+# ---------- 数据库迁移 ----------
+migration:
+  auto_migrate: true   # 是否自动迁移表结构（建表/加列等）；false 时需自行保证表结构已存在（如由外部迁移工具管理）
+  seed_data: true      # 是否初始化基础数据（内置 admin 账号、系统内置策略等）；幂等可重复执行
+
 # ---------- JWT 令牌 ----------
 jwt:
   # 签名密钥：生产环境务必改为强随机字符串，建议用 ${JWT_SECRET} 环境变量覆盖。

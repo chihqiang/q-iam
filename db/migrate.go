@@ -3,6 +3,7 @@ package db
 import (
 	"time"
 
+	"chihqiang/q-iam/config"
 	"chihqiang/q-iam/model"
 
 	"github.com/chihqiang/infra-go/hash"
@@ -10,21 +11,30 @@ import (
 )
 
 // Migrate 执行数据库迁移与种子数据初始化。
-func Migrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(
-		&model.Account{},
-		&model.Group{},
-		&model.Policy{},
-		&model.PolicyStatement{},
-		&model.DataScope{},
-		&model.PolicyAttachment{},
-		&model.App{},
-		&model.AuditLog{},
-		&model.PasswordHistory{},
-		&model.RefreshToken{},
-		&model.KeyStoreItem{},
-	); err != nil {
-		return err
+// 由配置控制两个阶段（均默认开启）：
+//   - AutoMigrate：是否自动迁移表结构（建表/加列等）；关闭时需自行保证表结构已存在（如由外部迁移工具管理）；
+//   - SeedData：是否初始化基础数据（内置 admin 账号、系统内置策略等）。
+func Migrate(db *gorm.DB, cfg config.MigrationConfig) error {
+	if cfg.AutoMigrate {
+		if err := db.AutoMigrate(
+			&model.Account{},
+			&model.Group{},
+			&model.Policy{},
+			&model.PolicyStatement{},
+			&model.DataScope{},
+			&model.PolicyAttachment{},
+			&model.App{},
+			&model.AuditLog{},
+			&model.PasswordHistory{},
+			&model.RefreshToken{},
+			&model.KeyStoreItem{},
+		); err != nil {
+			return err
+		}
+	}
+	// 基础数据初始化依赖表结构已存在；关闭 AutoMigrate 时需自行建表。
+	if !cfg.SeedData {
+		return nil
 	}
 	if err := seed(db); err != nil {
 		return err
