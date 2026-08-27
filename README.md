@@ -17,7 +17,7 @@
 - **授权规则**：策略 → 语句（Statement）→ 数据范围（DataScope）三级明细，支持 `Allow`/`Deny`、`*` 通配
 - **授权**：策略绑定到 账号/账号组/应用 三种主体
 - **数据权限**：`all` / `group` / `self` / `attribute` 四种数据范围
-- **判定语义**：显式 `Deny` 优先；权限集始终缓存（默认 DBStore，配置 Redis 后切换 RedisStore），授权变更即时失效
+- **判定语义**：显式 `Deny` 优先；权限集始终缓存（无 Redis 用进程内 MemCache，配置 Redis 后切换 RedisCache），授权变更即时失效
 
 ### 认证与安全（AuthN/AuthZ）
 
@@ -158,7 +158,6 @@ q-iam/
 ├── db/                  # 数据库迁移与种子数据（内置 admin + 系统策略）
 ├── model/               # 数据模型（q_iam_* 表）
 ├── logic/               # 业务逻辑层（Service）
-│   └── store/           # 通用键值存储抽象（DBStore / RedisStore）
 ├── handler/             # HTTP 处理器
 ├── middleware/          # 中间件（认证/权限/审计/加载账号）
 ├── route/               # 路由注册（统一 /api/v1 前缀）
@@ -175,7 +174,7 @@ q-iam/
 ### 分层说明
 
 - **model**：领域实体，GORM 模型，全部以 `q_iam_` 前缀建表
-- **logic**：核心业务逻辑，无 HTTP 依赖，便于复用与测试（`logic/store` 为键值存储抽象，默认 DBStore，配置 Redis 后切换 RedisStore）
+- **logic**：核心业务逻辑，无 HTTP 依赖，便于复用与测试（缓存统一用 infra-go cache：无 Redis 用进程内 MemCache，配置 Redis 后切换 RedisCache）
 - **handler**：参数绑定、统一响应（`{code, msg, data}`）、审计调用
 - **middleware**：请求链路横切关注点（认证 / 权限 / 审计 / 加载账号 / 信任代理）
 - **route**：唯一的路由注册点，声明式声明「审计模块 + 所需权限动作」

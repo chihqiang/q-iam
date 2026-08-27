@@ -6,14 +6,16 @@
 package svc
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"chihqiang/q-iam/config"
 	"chihqiang/q-iam/db"
 	"chihqiang/q-iam/logic"
-	"chihqiang/q-iam/logic/store"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/jwt"
 	"github.com/chihqiang/infra-go/logger"
 	"github.com/chihqiang/infra-go/orm"
@@ -23,10 +25,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// cacheDefaultExpire 无 Redis 时 MemCache 的默认过期时间。
+// 业务侧所有 SetEx/Expire 均显式传 TTL（账号缓存/权限缓存/黑名单/授权码消费/重用计数），
+// 此默认值仅作 MemCache 内部兜底（如 Increment 初始化、Set 未指定 TTL 时）。
+const cacheDefaultExpire = time.Minute
+
 // ServiceContext 服务上下文：持有应用运行所需的全部依赖。
 //
 // 字段按层组织，供路由注册（route）与各中间件直接访问：
-//   - 基础设施层：DB / JWT / Cipher / KVStore / RedisClient
+//   - 基础设施层：DB / JWT / Cipher / Cache / RedisClient
 //   - 业务逻辑层：*Logic（认证、账号、权限等核心逻辑）
 //
 // 处理器层（*Handler）是 HTTP 接口适配层，仅依赖业务逻辑层，
@@ -37,11 +44,8 @@ type ServiceContext struct {
 	DB          *gorm.DB
 	JWT         *jwt.JWT
 	Cipher      *logic.Cipher
-	KVStore     store.KVStore
+	Cache       cache.Cache
 	RedisClient redis.UniversalClient
-	// KVStoreCloser KVStore 后台生命周期管理（DBStore 过期键清理 worker；
-	// RedisStore 键自过期无需清理，配置 Redis 时置 nil）。
-	KVStoreCloser *store.DBStore
 
 	// 业务逻辑层
 	AuthLogic       *logic.AuthLogic
@@ -122,28 +126,24 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 操作审计（启动落库 worker）
 	ctx.AuditLogic = logic.NewAuditLogic(gormDB)
 
-	// 通用键值存储（缓存 / 一次性消费 / 计数等场景的后端抽象）：
-	// 默认用数据库表（DBStore，多节点共享）；配置 Redis 后自动切换 RedisStore。
-	// DBStore 启动后台过期清理 worker：一次性消费键（OAuth 授权码防重放、重用计数、
-	// 访问令牌黑名单等）TTL 到期后行残留，须周期清理，否则表无限膨胀。
-	dbStore := store.NewDBStore(gormDB)
-	dbStore.StartCleanupLoop(store.DefaultCleanupInterval)
-	ctx.KVStore = dbStore
-	ctx.KVStoreCloser = dbStore
+	// 通用缓存（缓存 / 一次性消费 / 计数等场景的统一后端）：
+	// 统一使用 infra-go cache.Cache —— 无 Redis 用进程内 MemCache（自带惰性删除 + 过期扫描，
+	// 无需外部清理 worker），配置 Redis 后自动切换 RedisCache（多节点共享）。
+	// 业务各 SetEx/Expire 均显式传 TTL，cacheDefaultExpire 仅作兜底默认。
 	if c.Redis.Addr != "" {
 		rc, err := redisx.New(c.Redis)
 		if err != nil {
 			return nil, fmt.Errorf("Redis 初始化失败: %w", err)
 		}
-		ctx.RedisClient = rc.Client()
-		ctx.KVStore = store.NewRedisStore(ctx.RedisClient, c.Redis.KeyPrefix)
-		ctx.KVStoreCloser = nil // Redis 键自过期，无需后台清理
-		logger.Infof("Redis 存储已启用: %s", c.Redis.Addr)
+		ctx.RedisClient = rc.Client() // redis.UniversalClient（限流器等底层操作用）
+		ctx.Cache = cache.NewRedisCache(rc, cache.WithCacheName("q-iam"))
+		logger.Infof("Redis 缓存已启用: %s", c.Redis.Addr)
 	} else {
-		// 多实例部署语义加固：限流/缓存/审计在无 Redis 时均为单进程实现，
-		// 多节点部署会被静默弱化（限流被节点数稀释、审计分散、缓存失效不跨节点）。
+		ctx.Cache = cache.NewMemCache(context.Background(), cacheDefaultExpire, cache.WithName("q-iam"))
+		// 多实例部署语义加固：限流/缓存/审计在无 Redis 时均为进程内实现，
+		// 多节点部署会被静默弱化（授权码防重放/令牌黑名单/权限失效等不跨节点）。
 		// 显式告警，避免把「Redis 可选」误读为「可随意多开」。
-		logger.Warnf("未配置 Redis：限流/缓存/审计为进程内实现，多实例部署将弱化安全语义（限流被节点数稀释、审计分散、缓存失效不跨节点），生产多实例部署请配置 Redis")
+		logger.Warnf("未配置 Redis：缓存/限流/审计为进程内实现，多实例部署将弱化安全语义（授权码防重放、令牌黑名单、缓存失效不跨节点），生产多实例部署请配置 Redis")
 	}
 
 	// 权限逻辑（加载账号/角色的权限集合，供中间件与各 handler 使用）
@@ -151,11 +151,11 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	// 认证（登录 / 注册 / 刷新 / 签发 Token / 账号缓存）
 	ctx.AuthLogic = logic.NewAuthLogic(gormDB, j, c)
-	// 账号信息缓存（认证中间件加载账号用）：复用 KVStore（DBStore/RedisStore），
+	// 账号信息缓存（认证中间件加载账号用）：复用 Cache（MemCache/RedisCache），
 	// 账号变更（禁用/删除/改密）通过 AccountLogic 注入的失效器主动失效。
-	ctx.AuthLogic.SetAccountCache(ctx.KVStore)
-	// 访问令牌撤销黑名单（登出时吊销当前 access token）：复用 KVStore
-	ctx.AuthLogic.SetBlacklistStore(ctx.KVStore)
+	ctx.AuthLogic.SetAccountCache(ctx.Cache)
+	// 访问令牌撤销黑名单（登出时吊销当前 access token）：复用 Cache
+	ctx.AuthLogic.SetBlacklistStore(ctx.Cache)
 
 	// 配置 Redis 后，登录/注册/刷新全局限流切换到 Redis 分布式实现（多节点共享限流）
 	if ctx.RedisClient != nil {
@@ -166,9 +166,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	// OAuth 授权（authorization_code）：应用换取 Token 的签发逻辑归口 OAuthLogic，
 	// 应用凭证校验注入 AppLogic；AuthLogic.Token 仅作为入口转发。
-	// 授权码一次性消费默认用 DBStore，配置 Redis 后由 KVStore 统一切换。
+	// 授权码一次性消费复用 Cache（无 Redis 用 MemCache，配置 Redis 用 RedisCache）。
 	ctx.OAuthLogic = logic.NewOAuthLogic(gormDB, j)
-	ctx.OAuthLogic.SetConsumedStore(ctx.KVStore)
+	ctx.OAuthLogic.SetConsumedStore(ctx.Cache)
 	ctx.OAuthLogic.SetAppLogic(ctx.AppLogic)
 	ctx.AuthLogic.SetOAuthLogic(ctx.OAuthLogic)
 
@@ -199,9 +199,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// OAuth UserInfo 需要加载用户权限
 	ctx.OAuthLogic.SetPermissionLogic(ctx.PermissionLogic)
 
-	// 权限集缓存：始终启用（默认 DBStore，配置 Redis 后为 RedisStore）。
+	// 权限集缓存：始终启用（无 Redis 用进程内 MemCache，配置 Redis 后为 RedisCache）。
 	// 权限来源变更（授权/组成员/账号组关联/策略规则）后主动失效缓存。
-	ctx.PermissionLogic.SetStore(ctx.KVStore)
+	ctx.PermissionLogic.SetStore(ctx.Cache)
 	ctx.GrantLogic.SetPermissionLogic(ctx.PermissionLogic)
 	ctx.GroupLogic.SetPermissionLogic(ctx.PermissionLogic)
 	ctx.AccountLogic.SetPermissionLogic(ctx.PermissionLogic)
@@ -211,12 +211,12 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 }
 
 // Close 释放服务运行期资源（服务退出时调用）：
-//   - 停止 DBStore 过期键清理 worker（若启用）；
+//   - 停止 MemCache 后台统计 goroutine（RedisCache 无后台任务，无需关闭）；
 //   - 停止审计落库 worker 并排空队列，避免丢失已入队日志；
 //   - 关闭 Redis 连接（若已启用）。
 func (s *ServiceContext) Close() {
-	if s.KVStoreCloser != nil {
-		s.KVStoreCloser.Close()
+	if mc, ok := s.Cache.(*cache.MemCache); ok {
+		mc.Close()
 	}
 	if s.AuditLogic != nil {
 		s.AuditLogic.Close()

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"chihqiang/q-iam/config"
-	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/hash"
 	"github.com/chihqiang/infra-go/jwt"
 	"github.com/chihqiang/infra-go/logger"
@@ -30,15 +30,15 @@ type AuthLogic struct {
 	cfg        config.Config
 	oauthLogic *OAuthLogic
 
-	// accountStore 账号信息缓存后端（注入 store.KVStore 接口，nil 表示不缓存）。
+	// accountStore 账号信息缓存后端（注入 infra-go cache.Cache 接口，nil 表示不缓存）。
 	// 供 GetAccountByID（认证中间件加载账号）使用：账号信息变更不频繁，短 TTL 缓存
 	// 可显著减少认证路径的 DB 查询。账号变更点（禁用/删除/改密）须主动失效。
-	accountStore store.KVStore
+	accountStore cache.Cache
 
-	// blacklistStore 访问令牌撤销黑名单后端（注入 store.KVStore 接口，nil 表示不启用）。
+	// blacklistStore 访问令牌撤销黑名单后端（注入 infra-go cache.Cache 接口，nil 表示不启用）。
 	// 登出时把当前 access token 的 jti 写入黑名单（TTL=令牌剩余有效期），
 	// Auth 中间件校验黑名单，使已登出会话的访问令牌立即失效（不再依赖自然过期）。
-	blacklistStore store.KVStore
+	blacklistStore cache.Cache
 
 	// loginLimiter 登录全局限流（ratelimit.Limiter 接口，默认内存令牌桶；
 	// 配置 Redis 后由 main 注入 RedisTokenBucket，实现多节点共享），
@@ -93,15 +93,15 @@ func (s *AuthLogic) SetOAuthLogic(o *OAuthLogic) {
 	s.oauthLogic = o
 }
 
-// SetAccountCache 注入账号信息缓存后端（实现 store.KVStore 接口，如 RedisStore / DBStore）。
+// SetAccountCache 注入账号信息缓存后端（实现 infra-go cache.Cache 接口，如 MemCache / RedisCache）。
 // nil 表示不缓存。账号缓存短 TTL（accountCacheTTL），账号变更通过 InvalidateAccountCache 主动失效。
-func (s *AuthLogic) SetAccountCache(st store.KVStore) {
+func (s *AuthLogic) SetAccountCache(st cache.Cache) {
 	s.accountStore = st
 }
 
-// SetBlacklistStore 注入访问令牌撤销黑名单后端（复用 store.KVStore：默认 DBStore，
-// 配置 Redis 后为 RedisStore）。nil 表示不启用访问令牌撤销。
-func (s *AuthLogic) SetBlacklistStore(st store.KVStore) {
+// SetBlacklistStore 注入访问令牌撤销黑名单后端（复用 infra-go cache.Cache：无 Redis 用 MemCache，
+// 配置 Redis 后为 RedisCache）。nil 表示不启用访问令牌撤销。
+func (s *AuthLogic) SetBlacklistStore(st cache.Cache) {
 	s.blacklistStore = st
 }
 
@@ -130,7 +130,8 @@ func (s *AuthLogic) RevokeAccessToken(ctx context.Context, accessToken string) {
 	if ttl <= 0 {
 		return
 	}
-	if _, err := s.blacklistStore.SetNX(ctx, accessTokenRevokedKey(jti), "1", ttl); err != nil {
+	// 黑名单键按 jti 唯一，SetEx 覆盖写即可（无需 SetNX 原子占位），TTL=令牌剩余有效期自动释放。
+	if err := s.blacklistStore.SetEx(ctx, accessTokenRevokedKey(jti), "1", ttl); err != nil {
 		logger.WarnCtx(ctx, "revoke access token failed", logger.Err(err))
 	}
 }
@@ -141,7 +142,12 @@ func (s *AuthLogic) IsAccessTokenRevoked(ctx context.Context, jti string) bool {
 		return false
 	}
 	v, err := s.blacklistStore.Get(ctx, accessTokenRevokedKey(jti))
-	return err == nil && v != ""
+	if err != nil {
+		// 未命中（cache.ErrNotFound）或存储故障：视为未吊销
+		return false
+	}
+	str, ok := cacheGetString(v, nil)
+	return ok && str != ""
 }
 
 // accountCacheTTL 账号信息缓存有效期。账号变更会主动失效，TTL 作为兜底。
@@ -158,7 +164,7 @@ func (s *AuthLogic) InvalidateAccountCache(ctx context.Context, accountID int64)
 	if s.accountStore == nil {
 		return
 	}
-	if err := s.accountStore.Del(ctx, accountCacheKeyFor(accountID)); err != nil {
+	if err := s.accountStore.Delete(ctx, accountCacheKeyFor(accountID)); err != nil {
 		logger.WarnCtx(ctx, "invalidate account cache failed",
 			logger.Err(err), logger.Int64("account_id", accountID))
 	}
@@ -367,13 +373,33 @@ func (s *AuthLogic) shouldRevokeAllOnReuse(ctx context.Context, accountID int64)
 	if s.accountStore == nil {
 		return true
 	}
-	n, err := s.accountStore.Incr(ctx, reuseCounterKey(accountID), reuseGraceWindow)
-	if err != nil {
+	// cache.Cache.Increment 原子自增但不返回新值，自增后读回计数判断阈值。
+	// 非严格原子（Increment 与 Get 之间可能叠加其他并发计数），方向保守：
+	// 计数值只会偏大，只会更早触发连坐，不会削弱安全性。
+	key := reuseCounterKey(accountID)
+	if err := s.accountStore.Increment(ctx, key, 1); err != nil {
 		logger.WarnCtx(ctx, "reuse counter failed, fallback to revoke all",
 			logger.Err(err), logger.Int64("account_id", accountID))
 		return true
 	}
-	return n >= reuseGraceThreshold
+	// 计数窗口：自增后设置 TTL，到期自动重置（滑动窗口语义——持续重放会不断延长
+	// 窗口并累积计数，更快触发连坐，方向保守安全）。
+	if err := s.accountStore.Expire(ctx, key, reuseGraceWindow); err != nil {
+		logger.WarnCtx(ctx, "reuse counter expire failed, fallback to revoke all",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		return true
+	}
+	n, err := s.accountStore.Get(ctx, key)
+	if err != nil {
+		logger.WarnCtx(ctx, "reuse counter get failed, fallback to revoke all",
+			logger.Err(err), logger.Int64("account_id", accountID))
+		return true
+	}
+	cnt, ok := cacheGetInt64(n, nil)
+	if !ok {
+		return true
+	}
+	return cnt >= reuseGraceThreshold
 }
 
 // cleanBusinessClaims 从解析出的令牌声明中提取业务字段（移除标准声明与 jti/token_type）。
@@ -678,13 +704,15 @@ func (s *AuthLogic) GetAccountByID(ctx context.Context, accountID int64) (*model
 	// 优先命中缓存
 	if s.accountStore != nil {
 		key := accountCacheKeyFor(accountID)
-		if data, err := s.accountStore.Get(ctx, key); err == nil && data != "" {
-			var account model.Account
-			if err := json.Unmarshal([]byte(data), &account); err == nil {
-				return &account, nil
+		if data, err := s.accountStore.Get(ctx, key); err == nil {
+			if str, ok := cacheGetString(data, nil); ok && str != "" {
+				var account model.Account
+				if err := json.Unmarshal([]byte(str), &account); err == nil {
+					return &account, nil
+				}
+				logger.WarnCtx(ctx, "account cache unmarshal failed",
+					logger.Err(err), logger.Int64("account_id", accountID))
 			}
-			logger.WarnCtx(ctx, "account cache unmarshal failed",
-				logger.Err(err), logger.Int64("account_id", accountID))
 		}
 	}
 
@@ -696,7 +724,7 @@ func (s *AuthLogic) GetAccountByID(ctx context.Context, accountID int64) (*model
 	// 写入缓存（失败仅告警，不影响主流程）
 	if s.accountStore != nil {
 		if data, err := json.Marshal(account); err == nil {
-			if err := s.accountStore.Set(ctx, accountCacheKeyFor(accountID), string(data), accountCacheTTL); err != nil {
+			if err := s.accountStore.SetEx(ctx, accountCacheKeyFor(accountID), string(data), accountCacheTTL); err != nil {
 				logger.WarnCtx(ctx, "account cache set failed",
 					logger.Err(err), logger.Int64("account_id", accountID))
 			}

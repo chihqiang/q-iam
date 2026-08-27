@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/jwt"
 	"github.com/chihqiang/infra-go/logger"
 	"github.com/chihqiang/infra-go/ratelimit"
@@ -78,10 +78,10 @@ type OAuthLogic struct {
 	appLogic  *AppLogic // 应用凭证校验（应用换取 Token）
 	permLogic *PermissionLogic
 
-	// consumedStore 授权码一次性消费的存储后端（注入 store.KVStore 接口）。
-	// 默认 DBStore（多节点共享）；可替换 RedisStore / 自定义实现。
+	// consumedStore 授权码一次性消费的存储后端（注入 infra-go cache.Cache 接口）。
+	// 无 Redis 用 MemCache（进程内）；配置 Redis 后由 svc 注入 RedisCache（多节点共享）。
 	// 授权码本身短时效（OAuthCodeExpire），消费记录 TTL 相同时长即可。
-	consumedStore store.KVStore
+	consumedStore cache.Cache
 
 	// tokenLimiter 应用换取 Token 全局限流（ratelimit.Limiter 接口，默认内存令牌桶；
 	// 配置 Redis 后由 main 注入 RedisTokenBucket，实现多节点共享），防凭证暴力枚举。
@@ -93,16 +93,16 @@ func NewOAuthLogic(db *gorm.DB, j *jwt.JWT) *OAuthLogic {
 	return &OAuthLogic{
 		db: db,
 		j:  j,
-		// 默认用数据库存储做授权码一次性消费（多节点共享）；
-		// 配置 Redis 后由 main 注入 RedisStore 替换。
-		consumedStore: store.NewDBStore(db),
+		// 授权码一次性消费存储由 svc 装配注入（无 Redis 用 MemCache，配置 Redis 用 RedisCache）；
+		// 未注入时 consumeCode 保守拒绝（fail-closed），保证防重放不静默失效。
+		consumedStore: nil,
 		// 换 Token：每秒补充 5 个令牌、突发 20（单机默认内存实现）
 		tokenLimiter: ratelimit.NewTokenBucket(5, 20),
 	}
 }
 
-// SetConsumedStore 注入授权码一次性消费的存储后端（默认 DBStore，可替换 RedisStore / 自定义）。
-func (o *OAuthLogic) SetConsumedStore(st store.KVStore) {
+// SetConsumedStore 注入授权码一次性消费的存储后端（无 Redis 用 MemCache，配置 Redis 用 RedisCache）。
+func (o *OAuthLogic) SetConsumedStore(st cache.Cache) {
 	o.consumedStore = st
 }
 
@@ -349,21 +349,40 @@ func (o *OAuthLogic) ExchangeCode(ctx context.Context, code string) (*CodeClaims
 }
 
 // consumeCode 消费一个授权码 jti，返回是否消费成功（false 表示已被消费过）。
-// 基于注入的 store.KVStore.SetNX 原子占位：
-//   - 默认 DBStore（多节点共享，主键唯一保证原子）；
-//   - 配置 Redis 后注入 RedisStore（SET NX 原子命令）。
+// 基于注入的 infra-go cache.Cache 用原子自增实现一次性语义：
+//   - Increment 原子自增（键不存在初始化为 1），值 == 1 表示首次消费（成功）；值 > 1 已被消费（拒绝）；
+//   - 并发保证：原子自增保证最多一个请求读到 1，杜绝授权码重放（其余请求读到的值只会更大）；
+//   - 自增后 Expire 设置 TTL（与授权码有效期一致），过期后键自动释放，无需手动清理。
 //
-// 消费记录 TTL 与授权码有效期一致（OAuthCodeExpire），过期后自动释放，无需手动清理。
+// 注意：Increment 后 Get 非严格原子，极端并发下可能出现多个请求都读到 >1（全部拒绝），
+// 方向保守（宁缺勿滥），不会出现两个请求同时消费成功。
 func (o *OAuthLogic) consumeCode(ctx context.Context, jti string) bool {
+	if o.consumedStore == nil {
+		// 未注入消费存储（装配缺失）：fail-closed 拒绝，避免防重放静默失效
+		logger.WarnCtx(ctx, "oauth consume store not configured, deny")
+		return false
+	}
+
 	key := "oauth:code:consumed:" + jti
-	ok, err := o.consumedStore.SetNX(ctx, key, "1", OAuthCodeExpire)
-	if err != nil {
+	if err := o.consumedStore.Increment(ctx, key, 1); err != nil {
 		logger.ErrorCtx(ctx, "oauth consume code failed", logger.Err(err))
 		// 存储故障时按未消费处理（放行），避免可用性受影响；
 		// 授权码本身短时效 + 应用凭证校验兜底，风险可控。
 		return true
 	}
-	return ok
+	if err := o.consumedStore.Expire(ctx, key, OAuthCodeExpire); err != nil {
+		logger.ErrorCtx(ctx, "oauth consume code expire failed", logger.Err(err))
+	}
+	v, err := o.consumedStore.Get(ctx, key)
+	if err != nil {
+		logger.ErrorCtx(ctx, "oauth consume code get failed", logger.Err(err))
+		return true
+	}
+	n, ok := cacheGetInt64(v, nil)
+	if !ok {
+		return true
+	}
+	return n == 1
 }
 
 // UserInfo 用户信息（UserInfo Endpoint 响应，对齐 OAuth 2.0 / OIDC 规范）。

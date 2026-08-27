@@ -8,19 +8,20 @@ import (
 
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/jwt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-// newTestOAuthLogic 构造 OAuthLogic（默认 DBStore 授权码消费）。
+// newTestOAuthLogic 构造 OAuthLogic（注入 MemCache 授权码消费，模拟无 Redis 装配）。
 func newTestOAuthLogic(t *testing.T) *OAuthLogic {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.App{}, &model.KeyStoreItem{}, &model.Account{}); err != nil {
+	if err := db.AutoMigrate(&model.App{}, &model.Account{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	j, err := jwt.New(jwt.Config{
@@ -31,10 +32,13 @@ func newTestOAuthLogic(t *testing.T) *OAuthLogic {
 	if err != nil {
 		t.Fatalf("jwt: %v", err)
 	}
-	return NewOAuthLogic(db, j)
+	o := NewOAuthLogic(db, j)
+	// 注入进程内缓存做授权码一次性消费（模拟生产无 Redis 装配；有 Redis 时由 svc 注入 RedisCache）
+	o.SetConsumedStore(cache.NewMemCache(context.Background(), time.Minute))
+	return o
 }
 
-// TestOAuthCodeOneTimeConsumption 验证授权码一次性消费（默认 DBStore 后端，SetNX 原子占位）。
+// TestOAuthCodeOneTimeConsumption 验证授权码一次性消费（MemCache 后端，Increment 原子自增）。
 func TestOAuthCodeOneTimeConsumption(t *testing.T) {
 	o := newTestOAuthLogic(t)
 	ctx := context.Background()
@@ -51,14 +55,15 @@ func TestOAuthCodeOneTimeConsumption(t *testing.T) {
 	if !o.consumeCode(ctx, "jti-002") {
 		t.Fatal("different jti should consume independently")
 	}
+}
 
-	// 跨实例（新 OAuthLogic 实例共享同一 DBStore 表）也能防重放
-	o2 := newTestOAuthLogic(t)
-	// 注意：o2 使用不同的内存库，这里仅验证接口接线；
-	// 真实多实例共享依赖同一数据库/Redis，由 store 后端保证。
-	if o2.consumeCode(ctx, "jti-001") {
-		// 若 o2 与 o1 共享存储则应为 false；此处不同库，允许为 true，仅验证方法不 panic。
-		_ = 0
+// TestOAuthCodeConsumeWithoutStore 验证未注入消费存储时 fail-closed：拒绝消费，
+// 避免授权码防重放因装配缺失被静默失效。
+func TestOAuthCodeConsumeWithoutStore(t *testing.T) {
+	o := NewOAuthLogic(nil, nil)
+	ctx := context.Background()
+	if o.consumeCode(ctx, "jti-x") {
+		t.Fatal("consume without store should fail closed")
 	}
 }
 

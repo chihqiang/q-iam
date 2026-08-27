@@ -27,7 +27,6 @@ func Migrate(db *gorm.DB, cfg config.MigrationConfig) error {
 			&model.AuditLog{},
 			&model.PasswordHistory{},
 			&model.RefreshToken{},
-			&model.KeyStoreItem{},
 		); err != nil {
 			return err
 		}

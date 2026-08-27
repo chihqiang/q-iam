@@ -203,18 +203,18 @@ authed.AddRoutes([]httpx.Route{
 
 ## 7. 权限缓存
 
-权限集缓存**始终启用**，后端通过统一的 `KVStore` 接口注入（见 `svc/servicecontext.go`）：
+权限集缓存**始终启用**，后端统一使用 infra-go `cache.Cache` 接口注入（见 `svc/servicecontext.go`）：
 
 | 后端 | 适用场景 | 说明 |
 | --- | --- | --- |
-| `DBStore`（默认） | 未配置 Redis / 单机 | 基于数据库表，多节点同样共享，适合低频到中频读写 |
-| `RedisStore`（配置 Redis 后） | 多节点水平扩展 | 基于 Redis，高并发 |
+| `MemCache`（未配置 Redis） | 单机 | 进程内实现（惰性删除 + 过期扫描 + LRU），不跨节点 |
+| `RedisCache`（配置 Redis 后） | 多节点水平扩展 | 基于 Redis，多节点共享，高并发 |
 
 | 项 | 值 |
 | --- | --- |
 | 缓存键 | `perm:acct:{id}` / `perm:group:{id}` / `perm:app:{id}` |
 | TTL | 60 秒（兜底） |
-| 主动失效 | 权限来源变更时立即失效（与缓存后端无关，DBStore/RedisStore 均生效） |
+| 主动失效 | 权限来源变更时立即失效（与缓存后端无关，MemCache/RedisCache 均生效） |
 
 **失效触发点**（权限来源变化）：
 
@@ -226,7 +226,9 @@ authed.AddRoutes([]httpx.Route{
 | 账号组状态变更（启→禁） | 该组（连带组内账号） |
 | 策略规则修改/删除 | 所有引用该策略的主体 |
 
-> 无论使用 `DBStore` 还是 `RedisStore`，授权/策略变更都会主动失效对应缓存，保证即时生效；TTL 仅作为异常兜底。
+> 无论使用 `MemCache` 还是 `RedisCache`，授权/策略变更都会主动失效对应缓存，保证即时生效；TTL 仅作为异常兜底。
+>
+> 注意：未配置 Redis 时 `MemCache` 为进程内实现，多实例部署下权限缓存失效不跨节点，生产多节点部署请配置 Redis。
 
 ---
 
@@ -292,7 +294,7 @@ authed.AddRoutes([]httpx.Route{
 4. **Deny 谨慎使用**：Deny 优先级最高，误配可能导致权限被误回收。
 5. **禁用优先于删除**：临时收回权限用"禁用策略/账号"，可随时恢复；删除会级联清理授权关系。
 6. **数据权限必配**：涉及敏感数据（订单/用户信息）的接口，除动作级权限外应叠加 `data_scopes` 数据级过滤。
-7. **权限变更即时性**：权限集缓存（`DBStore` 或 `RedisStore`）在授权/策略变更时主动失效，TTL 仅兜底，变更即时生效，无需担心滞后。
+7. **权限变更即时性**：权限集缓存（`MemCache` 或 `RedisCache`）在授权/策略变更时主动失效，TTL 仅兜底，变更即时生效，无需担心滞后。
 
 ---
 
@@ -303,9 +305,8 @@ authed.AddRoutes([]httpx.Route{
 | `model/policy.go` | Policy / PolicyStatement / DataScope / PolicyAttachment / PrincipalType 模型 |
 | `logic/permission.go` | 权限加载（LoadPermissionSet）、判定（Check）、通配匹配、缓存 |
 | `logic/grant.go` | 授权/解绑（Grant / Revoke）、失效权限缓存 |
-| `logic/store/` | 键值存储抽象（DBStore 默认 / RedisStore，权限集缓存后端） |
 | `middleware/permission.go` | 动作级权限校验中间件（admin 放行） |
 | `logic/policy.go` | 策略 CRUD |
 | `db/migrate.go` | 种子数据（内置 admin + AdministratorAccess 系统策略） |
-| `svc/servicecontext.go` | 服务上下文：集中装配权限逻辑与 KVStore 注入 |
+| `svc/servicecontext.go` | 服务上下文：集中装配权限逻辑与 infra-go cache（MemCache / RedisCache）缓存注入 |
 | `route/route.go` | 路由声明各动作所需权限 |

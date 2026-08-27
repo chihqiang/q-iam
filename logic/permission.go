@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/logger"
 	"gorm.io/gorm"
 )
@@ -80,7 +80,7 @@ func (ps *PermissionSet) CheckResource(action, resource string) bool {
 // PermissionLogic 权限加载与判定。
 type PermissionLogic struct {
 	db    *gorm.DB
-	store store.KVStore // 权限集缓存后端（注入 store.KVStore 接口，nil 表示不缓存）
+	store cache.Cache // 权限集缓存后端（注入 infra-go cache.Cache 接口，nil 表示不缓存）
 }
 
 // NewPermissionLogic 创建权限逻辑。
@@ -88,9 +88,9 @@ func NewPermissionLogic(db *gorm.DB) *PermissionLogic {
 	return &PermissionLogic{db: db}
 }
 
-// SetStore 注入权限集缓存后端（实现 store.KVStore 接口，如 RedisStore / DBStore / 自定义）。
+// SetStore 注入权限集缓存后端（实现 infra-go cache.Cache 接口，如 MemCache / RedisCache）。
 // nil 表示不缓存。权限集缓存短 TTL（permCacheTTL），授权变更通过 InvalidatePermissionCache 主动失效。
-func (s *PermissionLogic) SetStore(st store.KVStore) {
+func (s *PermissionLogic) SetStore(st cache.Cache) {
 	s.store = st
 }
 
@@ -121,7 +121,7 @@ func (s *PermissionLogic) InvalidatePermissionCache(ctx context.Context, pt mode
 			}
 		}
 	}
-	if err := s.store.Del(ctx, keys...); err != nil {
+	if err := s.store.Delete(ctx, keys...); err != nil {
 		logger.WarnCtx(ctx, "invalidate permission cache failed", logger.Err(err))
 	}
 }
@@ -132,11 +132,15 @@ func (s *PermissionLogic) rulesFromCache(ctx context.Context, key string) ([]Per
 		return nil, false
 	}
 	data, err := s.store.Get(ctx, key)
-	if err != nil || data == "" {
+	if err != nil {
+		return nil, false
+	}
+	str, ok := cacheGetString(data, nil)
+	if !ok || str == "" {
 		return nil, false
 	}
 	var rules []PermissionRule
-	if err := json.Unmarshal([]byte(data), &rules); err != nil {
+	if err := json.Unmarshal([]byte(str), &rules); err != nil {
 		logger.WarnCtx(ctx, "permission cache unmarshal failed", logger.Err(err))
 		return nil, false
 	}
@@ -152,7 +156,7 @@ func (s *PermissionLogic) rulesToCache(ctx context.Context, key string, rules []
 	if err != nil {
 		return
 	}
-	if err := s.store.Set(ctx, key, string(data), permCacheTTL); err != nil {
+	if err := s.store.SetEx(ctx, key, string(data), permCacheTTL); err != nil {
 		logger.WarnCtx(ctx, "permission cache set failed", logger.Err(err))
 	}
 }

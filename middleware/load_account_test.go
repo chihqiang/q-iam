@@ -11,9 +11,9 @@ import (
 
 	"chihqiang/q-iam/config"
 	"chihqiang/q-iam/logic"
-	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/hash"
 	"github.com/chihqiang/infra-go/jwt"
 	"gorm.io/driver/sqlite"
@@ -30,7 +30,7 @@ func newLoadAccountTestEnv(t *testing.T) (*jwt.JWT, *logic.AuthLogic, *gorm.DB, 
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Account{}, &model.KeyStoreItem{}); err != nil {
+	if err := db.AutoMigrate(&model.Account{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -192,8 +192,8 @@ func TestLoadAccount_RejectsDisabledAccount(t *testing.T) {
 // 证明认证路径确实走缓存、不再每次查库。
 func TestLoadAccount_AccountCacheHit(t *testing.T) {
 	j, authSvc, db, acct := newLoadAccountTestEnv(t)
-	// 注入 DBStore 账号缓存（与生产默认一致）
-	authSvc.SetAccountCache(store.NewDBStore(db))
+	// 注入 MemCache 账号缓存（与生产无 Redis 默认一致）
+	authSvc.SetAccountCache(cache.NewMemCache(context.Background(), time.Minute))
 
 	userToken, err := j.GenerateAccessToken(jwt.Claims{
 		jwt.ClaimKeyUserID:   float64(acct.ID),
@@ -241,7 +241,7 @@ func TestLoadAccount_AccountCacheHit(t *testing.T) {
 // 账号被禁用后，即使旧账号信息曾在缓存中，失效后认证中间件能读到禁用状态并拒绝（403）。
 func TestLoadAccount_RejectsDisabledAccountAfterCacheInvalidation(t *testing.T) {
 	j, authSvc, db, acct := newLoadAccountTestEnv(t)
-	authSvc.SetAccountCache(store.NewDBStore(db))
+	authSvc.SetAccountCache(cache.NewMemCache(context.Background(), time.Minute))
 
 	userToken, err := j.GenerateAccessToken(jwt.Claims{
 		jwt.ClaimKeyUserID:   float64(acct.ID),

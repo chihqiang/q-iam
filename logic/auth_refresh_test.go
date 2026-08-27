@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"chihqiang/q-iam/config"
-	"chihqiang/q-iam/logic/store"
 	"chihqiang/q-iam/model"
 
+	"github.com/chihqiang/infra-go/cache"
 	"github.com/chihqiang/infra-go/hash"
 	"github.com/chihqiang/infra-go/jwt"
 	"gorm.io/driver/sqlite"
@@ -223,11 +223,8 @@ func TestRefreshTokenReuseGraceWindow(t *testing.T) {
 	svc, db, acct := newTestAuthLogic(t)
 	ctx := context.Background()
 
-	// 注入账号缓存/计数后端（DBStore，模拟生产装配），重用时间窗依赖计数存储
-	if err := db.AutoMigrate(&model.KeyStoreItem{}); err != nil {
-		t.Fatalf("migrate keystore: %v", err)
-	}
-	svc.SetAccountCache(store.NewDBStore(db))
+	// 注入账号缓存/计数后端（MemCache，模拟生产无 Redis 装配），重用时间窗依赖计数存储
+	svc.SetAccountCache(cache.NewMemCache(context.Background(), time.Minute))
 
 	resp, err := svc.Login(ctx, &LoginRequest{AccountName: acct.AccountName, Password: "Password123"}, "127.0.0.1", "go-test")
 	if err != nil {
@@ -267,13 +264,11 @@ func TestRefreshTokenReuseGraceWindow(t *testing.T) {
 // 登录签发的 access token 携带 jti，RevokeAccessToken 后 IsAccessTokenRevoked 命中，
 // 且无效/过期令牌撤销静默忽略（幂等）。
 func TestAccessTokenRevocation(t *testing.T) {
-	svc, db, acct := newTestAuthLogic(t)
+	svc, _, acct := newTestAuthLogic(t)
 	ctx := context.Background()
 
-	if err := db.AutoMigrate(&model.KeyStoreItem{}); err != nil {
-		t.Fatalf("migrate keystore: %v", err)
-	}
-	kv := store.NewDBStore(db)
+	// 注入访问令牌撤销黑名单后端（MemCache，模拟生产无 Redis 装配）
+	kv := cache.NewMemCache(context.Background(), time.Minute)
 	svc.SetBlacklistStore(kv)
 
 	resp, err := svc.Login(ctx, &LoginRequest{AccountName: acct.AccountName, Password: "Password123"}, "127.0.0.1", "go-test")
