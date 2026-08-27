@@ -3,7 +3,7 @@ module chihqiang/q-iam
 go 1.25.11
 
 require (
-	github.com/chihqiang/infra-go v0.0.0-20260819053406-16a6d34feac8
+	github.com/chihqiang/infra-go v0.0.0-20260827162817-0adfb4b51eb8
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.21.0
 	gorm.io/driver/sqlite v1.6.0
