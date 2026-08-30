@@ -41,7 +41,7 @@ export interface Profile {
 
 // 一条生效的权限规则（由策略解析而来，含来源策略名与数据范围）
 export interface PermissionStatement {
-  effect: 'Allow' | 'Deny'
+  effect: Effect
   action: string
   source?: string
   data_scopes?: DataScope[]
@@ -72,9 +72,14 @@ export interface Group {
   accounts?: Account[]
 }
 
-// ===== 策略 =====
+// ===== 策略 / 授权语句（语句池）=====
 
-export type Effect = 'Allow' | 'Deny'
+// 授权效果常量（统一引用，避免字符串字面量散落各处）。
+// 后端存储与对外展示统一为这两个标准值。
+export const EFFECT_ALLOW = 'Allow' as const
+export const EFFECT_DENY = 'Deny' as const
+
+export type Effect = typeof EFFECT_ALLOW | typeof EFFECT_DENY
 export type PrincipalType = 'account' | 'group' | 'app'
 
 export interface Policy {
@@ -84,18 +89,28 @@ export interface Policy {
   description: string
   type: 'system' | 'custom'
   status: boolean
-  statements: PolicyStatement[]
+  // 关联的授权语句（语句池共享引用，策略只负责关联）
+  statements: Statement[]
 }
 
-export interface PolicyStatement {
-  id?: number
+// 授权语句（语句池，独立菜单管理）
+// 定义一条完整的授权规则：效果（Allow/Deny）+ 操作（Action）+ 资源（Resource）
+// + 数据范围（Scopes）。可被多个策略共享引用，修改后所有关联策略同步生效。
+export interface Statement {
+  id: number
   // 语句描述（小标题，说明本条授权规则的用途）
   description?: string
   effect: Effect
   action: string
+  // 资源（支持 * 通配，默认 * 表示全部资源）
+  resource?: string
   // 数据范围（数据权限：可见/操作哪部分数据）
   scopes?: DataScope[]
   sort: number
+  // 创建者用户 ID（0 表示系统内置）
+  created_by?: number
+  created_at?: string
+  updated_at?: string
 }
 
 // ===== 数据范围（DataScope）=====

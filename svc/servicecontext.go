@@ -52,6 +52,7 @@ type ServiceContext struct {
 	AccountLogic    *logic.AccountLogic
 	GroupLogic      *logic.GroupLogic
 	PolicyLogic     *logic.PolicyLogic
+	StatementLogic  *logic.StatementLogic
 	GrantLogic      *logic.GrantLogic
 	AppLogic        *logic.AppLogic
 	AuditLogic      *logic.AuditLogic
@@ -183,10 +184,14 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 账号变更（禁用/删除/改密/重置密码）后失效认证中间件的账号缓存（AuthLogic 实现）
 	ctx.AccountLogic.SetCacheInvalidator(ctx.AuthLogic)
 
-	// 账号组 / 权限策略 / 授权 / 历史数据清理
+	// 账号组 / 权限策略 / 授权语句池 / 授权 / 历史数据清理
 	ctx.GroupLogic = logic.NewGroupLogic(gormDB)
 
 	ctx.PolicyLogic = logic.NewPolicyLogic(gormDB)
+
+	// 授权语句（语句池）：独立菜单管理，策略只负责关联；语句变更后失效引用它的策略的权限缓存
+	ctx.StatementLogic = logic.NewStatementLogic(gormDB)
+	ctx.StatementLogic.SetPermissionLogic(ctx.PermissionLogic)
 
 	ctx.GrantLogic = logic.NewGrantLogic(gormDB)
 

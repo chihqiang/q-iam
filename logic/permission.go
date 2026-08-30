@@ -67,10 +67,10 @@ func (ps *PermissionSet) CheckResource(action, resource string) bool {
 
 		// 显式拒绝优先；仅显式 Allow 计入允许，避免存量脏数据（非 Deny 的非法值）被当作放行
 		effect := strings.TrimSpace(rule.Effect)
-		if strings.EqualFold(effect, "Deny") {
+		if strings.EqualFold(effect, model.EffectDeny) {
 			return false
 		}
-		if strings.EqualFold(effect, "Allow") {
+		if strings.EqualFold(effect, model.EffectAllow) {
 			allowed = true
 		}
 	}
@@ -123,6 +123,22 @@ func (s *PermissionLogic) InvalidatePermissionCache(ctx context.Context, pt mode
 	}
 	if err := s.store.Delete(ctx, keys...); err != nil {
 		logger.WarnCtx(ctx, "invalidate permission cache failed", logger.Err(err))
+	}
+}
+
+// InvalidatePolicyReferences 使所有引用指定策略的主体的权限缓存失效。
+// 策略规则/状态/关联语句变化后调用，使变更即时生效（策略 → 授权主体）。
+// 由 PolicyLogic（策略自身变更）与 StatementLogic（语句变更影响引用策略）共用。
+func (s *PermissionLogic) InvalidatePolicyReferences(ctx context.Context, policyID int64) {
+	if s.store == nil {
+		return
+	}
+	var attachments []model.PolicyAttachment
+	if err := s.db.WithContext(ctx).Where("policy_id = ?", policyID).Find(&attachments).Error; err != nil {
+		return
+	}
+	for _, a := range attachments {
+		s.InvalidatePermissionCache(ctx, a.PrincipalType, a.PrincipalID)
 	}
 }
 

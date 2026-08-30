@@ -1,9 +1,9 @@
 // 数据权限 API（子系统按需拉取当前主体的权限规则 + 数据范围）
 import { get } from './client'
-import type { DataScope } from '@/types'
+import type { DataScope, Effect } from '@/types'
 
 export interface DataPermissionStatement {
-  effect: 'Allow' | 'Deny'
+  effect: Effect
   action: string
   source?: string
   data_scopes?: DataScope[]

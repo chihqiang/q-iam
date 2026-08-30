@@ -9,6 +9,7 @@ import {
   KeyRound,
   Blocks,
   ScrollText,
+  ListChecks,
 } from '@lucide/vue'
 
 // ===== 管理后台路由（单一数据源）=====
@@ -35,6 +36,12 @@ const adminChildren: RouteRecordRaw[] = [
     name: 'policies',
     component: () => import('@/views/policies/index.vue'),
     meta: { title: '权限策略', icon: ShieldCheck, menuGroup: '权限管理', action: 'iam:policy:read' },
+  },
+  {
+    path: 'statements',
+    name: 'statements',
+    component: () => import('@/views/statements/index.vue'),
+    meta: { title: '授权语句', icon: ListChecks, menuGroup: '权限管理', action: 'iam:policy:read' },
   },
   {
     path: 'grants',

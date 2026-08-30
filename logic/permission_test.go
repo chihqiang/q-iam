@@ -36,9 +36,9 @@ func TestMatchResource(t *testing.T) {
 //   - CheckResource 按资源匹配，显式 Deny 优先。
 func TestPermissionSetCheckResource(t *testing.T) {
 	ps := &PermissionSet{rules: []PermissionRule{
-		{Effect: "Allow", Action: "iam:account:read", Resource: "*"},
-		{Effect: "Allow", Action: "iam:account:write", Resource: "deptA:*"},
-		{Effect: "Deny", Action: "iam:account:delete", Resource: "*"},
+		{Effect: model.EffectAllow, Action: "iam:account:read", Resource: "*"},
+		{Effect: model.EffectAllow, Action: "iam:account:write", Resource: "deptA:*"},
+		{Effect: model.EffectDeny, Action: "iam:account:delete", Resource: "*"},
 	}}
 
 	// Check（无资源上下文）：仅全资源规则生效
@@ -81,7 +81,7 @@ func TestPermissionSetCheckResource(t *testing.T) {
 //   - group → 指定组并集 + self；attribute → 降级 self。
 func TestAggregateDataScopes(t *testing.T) {
 	mkRule := func(action string, scopes ...model.DataScope) PermissionRule {
-		return PermissionRule{Effect: "Allow", Action: action, DataScopes: scopes}
+		return PermissionRule{Effect: model.EffectAllow, Action: action, DataScopes: scopes}
 	}
 	groupScope := func(id int64) model.DataScope {
 		return model.DataScope{ScopeType: model.DataScopeGroup, GroupID: id}

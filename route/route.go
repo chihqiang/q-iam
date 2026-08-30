@@ -23,6 +23,7 @@ import (
 //	│  /accounts    账号 CRUD
 //	│  /groups      账号组 CRUD
 //	├─ 权限管理（Permission）────────────────────────────
+//	│  /statements  授权语句池（独立菜单，策略只负责关联）
 //	│  /policies    权限策略 CRUD
 //	│  /grants      授权（策略绑定到 账号/账号组/角色/应用）
 //	└─ 集成管理（Integration）───────────────────────────
@@ -37,6 +38,7 @@ func Register(server *httpx.Server, ctx *svc.ServiceContext) {
 	accountHandler := handler.NewAccountHandler(ctx.AccountLogic)
 	groupHandler := handler.NewGroupHandler(ctx.GroupLogic)
 	policyHandler := handler.NewPolicyHandler(ctx.PolicyLogic)
+	statementHandler := handler.NewStatementHandler(ctx.StatementLogic)
 	grantHandler := handler.NewGrantHandler(ctx.GrantLogic)
 	appHandler := handler.NewAppHandler(ctx.AppLogic)
 	auditHandler := handler.NewAuditHandler(ctx.AuditLogic)
@@ -188,6 +190,19 @@ func Register(server *httpx.Server, ctx *svc.ServiceContext) {
 		{Method: http.MethodPut, Path: "/policies/{id}", Handler: policyHandler.Update},
 		{Method: http.MethodDelete, Path: "/policies/{id}", Handler: policyHandler.Delete},
 	}, httpx.WithMiddlewares(auditW("policy", "", perm("iam:policy:write"))...))
+
+	// 授权语句池管理（权限管理）：独立菜单维护授权规则，策略新增/编辑只负责关联。
+	// 写操作记录审计；删除被策略关联的语句由逻辑层拒绝。
+	authed.AddRoutes([]httpx.Route{
+		{Method: http.MethodGet, Path: "/statements", Handler: statementHandler.List},
+		{Method: http.MethodGet, Path: "/statements/all", Handler: statementHandler.AllList},
+		{Method: http.MethodGet, Path: "/statements/{id}", Handler: statementHandler.Detail},
+	}, httpx.WithMiddleware(perm("iam:policy:read")))
+	authed.AddRoutes([]httpx.Route{
+		{Method: http.MethodPost, Path: "/statements", Handler: statementHandler.Create},
+		{Method: http.MethodPut, Path: "/statements/{id}", Handler: statementHandler.Update},
+		{Method: http.MethodDelete, Path: "/statements/{id}", Handler: statementHandler.Delete},
+	}, httpx.WithMiddlewares(auditW("statement", "", perm("iam:policy:write"))...))
 
 	// 授权管理（权限管理）：写操作记录审计，读操作（GET）由审计中间件自动跳过
 	authed.AddRoutes([]httpx.Route{

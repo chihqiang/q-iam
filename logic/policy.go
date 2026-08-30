@@ -3,7 +3,6 @@ package logic
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"chihqiang/q-iam/model"
@@ -12,7 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// PolicyLogic 权限策略管理逻辑：策略 CRUD 与授权规则（主从表）维护。
+// PolicyLogic 权限策略管理逻辑：策略 CRUD 与授权语句关联维护。
+// 授权语句（Statement）独立成池管理（见 statement.go），策略新增/编辑只负责关联（选择已有语句）。
 type PolicyLogic struct {
 	db *gorm.DB
 	// permLogic 权限逻辑（策略变更后失效引用该策略的主体的权限缓存，nil 表示不失效）。
@@ -134,7 +134,7 @@ func (s *PolicyLogic) CanViewPolicy(ctx context.Context, viewerID, targetID int6
 	return s.permLogic.CanAccessPolicy(ctx, viewerID, targetID)
 }
 
-// GetByID 策略详情（含授权规则主从表）。
+// GetByID 策略详情（含关联的授权语句及其数据范围）。
 func (s *PolicyLogic) GetByID(ctx context.Context, id int64) (*model.Policy, error) {
 	var policy model.Policy
 	if err := s.db.WithContext(ctx).
@@ -148,49 +148,15 @@ func (s *PolicyLogic) GetByID(ctx context.Context, id int64) (*model.Policy, err
 	return &policy, nil
 }
 
-// --- 策略 DTO ---
-
-// PolicyStatementDTO 策略授权规则。
-type PolicyStatementDTO struct {
-	// Description 语句描述（小标题，说明本条授权规则的用途）。
-	Description string `json:"description"`
-	// Effect 效果：Allow | Deny。
-	Effect string `json:"effect"`
-	// Action 操作（逗号分隔）。
-	Action string `json:"action"`
-	// Resource 资源（支持 * 通配，默认 * 表示全部资源）。
-	Resource string `json:"resource"`
-	// Scopes 数据范围明细（数据权限）。
-	Scopes []PolicyScopeDTO `json:"scopes"`
-	// Sort 排序。
-	Sort int64 `json:"sort"`
-}
-
-// PolicyScopeDTO 策略语句的数据范围。
-// 类型：all（全部）/ group（本用户分组）/ self（本人数据）/ attribute（属性过滤）。
-type PolicyScopeDTO struct {
-	// ScopeType 数据范围类型：all | group | self | attribute。
-	ScopeType model.DataScopeType `json:"scope_type"`
-	// GroupID 用户分组 ID（scope_type=group 时使用）。
-	GroupID int64 `json:"group_id"`
-	// OwnerField 数据归属字段名（scope_type=self 时使用）。
-	OwnerField string `json:"owner_field"`
-	// AttrKey 数据属性键（scope_type=attribute 时使用）。
-	AttrKey string `json:"attr_key"`
-	// AttrValue 数据属性值（scope_type=attribute 时使用）。
-	AttrValue string `json:"attr_value"`
-	// Sort 排序。
-	Sort int64 `json:"sort"`
-}
-
 // --- 创建 ---
 
 // PolicyCreateRequest 创建策略请求。
+// 授权语句通过 StatementIDs 关联语句池中的已有语句（不内嵌编辑语句）。
 type PolicyCreateRequest struct {
 	Name        string `json:"name" binding:"required"`
 	Description string `json:"description"`
-	// Statements 授权规则明细（至少一条）。
-	Statements []PolicyStatementDTO `json:"statements" binding:"required"`
+	// StatementIDs 关联的授权语句 ID 列表（至少一条）。
+	StatementIDs []int64 `json:"statement_ids" binding:"required"`
 	// Status 状态（默认启用，nil 视为 true；与账号/账号组创建语义一致）。
 	Status *bool `json:"status"`
 	// CreatedBy 创建者 ID（由 handler 注入）。
@@ -219,8 +185,13 @@ func (s *PolicyLogic) Create(ctx context.Context, req *PolicyCreateRequest) (*mo
 		status = *req.Status
 	}
 
-	// 授权规则入参校验（Effect/Action/ScopeType 及数据范围必填字段）
-	if err := validateStatements(req.Statements); err != nil {
+	// 关联语句去重 + 校验存在性
+	statementIDs := uniqueIDs(req.StatementIDs)
+	if len(statementIDs) == 0 {
+		return nil, errors.New("至少关联一条授权语句")
+	}
+	statements, err := s.statementsByIDs(ctx, statementIDs, req.CreatedBy)
+	if err != nil {
 		return nil, err
 	}
 
@@ -233,10 +204,12 @@ func (s *PolicyLogic) Create(ctx context.Context, req *PolicyCreateRequest) (*mo
 		CreatedBy:   req.CreatedBy,
 	}
 
-	buildStatements(req.Statements, &policy)
-
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Create(&policy).Error
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&policy).Error; err != nil {
+			return err
+		}
+		// 通过关联表建立策略 ↔ 语句 多对多关联
+		return tx.Model(&policy).Association("Statements").Append(statements)
 	})
 	if err != nil {
 		return nil, err
@@ -249,12 +222,15 @@ func (s *PolicyLogic) Create(ctx context.Context, req *PolicyCreateRequest) (*mo
 // --- 更新 ---
 
 // PolicyUpdateRequest 更新策略请求。
+// StatementIDs 关联的授权语句 ID 列表（nil 表示不修改关联，非 nil 则整体替换关联）。
 type PolicyUpdateRequest struct {
 	ID          int64  `json:"id"`
 	Description string `json:"description"`
 	Status      *bool  `json:"status"`
-	// Statements 授权规则（nil 表示不修改，整体替换）。
-	Statements []PolicyStatementDTO `json:"statements"`
+	// StatementIDs 授权语句关联（nil 表示不修改，整体替换）。
+	StatementIDs []int64 `json:"statement_ids"`
+	// CreatedBy 当前操作账号 ID（由 handler 注入，用于语句归属校验；0 表示 admin）。
+	CreatedBy int64 `json:"-"`
 }
 
 // Update 更新策略。
@@ -279,9 +255,16 @@ func (s *PolicyLogic) Update(ctx context.Context, req *PolicyUpdateRequest) (*mo
 		updates["status"] = *req.Status
 	}
 
-	// 授权规则入参校验（整体替换前），避免写入非法 Effect 等脏数据
-	if req.Statements != nil {
-		if err := validateStatements(req.Statements); err != nil {
+	// 关联语句去重 + 校验存在性（整体替换前）
+	var statements []model.Statement
+	if req.StatementIDs != nil {
+		ids := uniqueIDs(req.StatementIDs)
+		if len(ids) == 0 {
+			return nil, errors.New("至少关联一条授权语句")
+		}
+		var err error
+		statements, err = s.statementsByIDs(ctx, ids, req.CreatedBy)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -290,9 +273,9 @@ func (s *PolicyLogic) Update(ctx context.Context, req *PolicyUpdateRequest) (*mo
 		if err := tx.Model(&policy).Updates(updates).Error; err != nil {
 			return err
 		}
-		// 整体替换授权规则
-		if req.Statements != nil {
-			if err := replacePolicyStatements(tx, &policy, req.Statements); err != nil {
+		// 整体替换关联的授权语句
+		if req.StatementIDs != nil {
+			if err := tx.Model(&policy).Association("Statements").Replace(statements); err != nil {
 				return err
 			}
 		}
@@ -302,9 +285,9 @@ func (s *PolicyLogic) Update(ctx context.Context, req *PolicyUpdateRequest) (*mo
 		return nil, err
 	}
 
-	// 策略规则/状态变更：失效所有引用该策略的主体的权限缓存，使变更即时生效
+	// 策略规则/状态/关联变更：失效所有引用该策略的主体的权限缓存，使变更即时生效
 	if s.permLogic != nil {
-		s.invalidatePolicyReferences(ctx, policy.ID)
+		s.permLogic.InvalidatePolicyReferences(ctx, policy.ID)
 	}
 
 	logger.InfoCtx(ctx, "policy updated", logger.Int64("policy_id", policy.ID))
@@ -314,7 +297,7 @@ func (s *PolicyLogic) Update(ctx context.Context, req *PolicyUpdateRequest) (*mo
 // --- 删除 ---
 
 // Delete 删除策略。
-// 系统内置策略不可删除；删除时级联清理授权关系与授权规则。
+// 系统内置策略不可删除；删除时清理授权关系并解除与授权语句的关联（不删除语句池中的语句）。
 func (s *PolicyLogic) Delete(ctx context.Context, id int64) error {
 	var policy model.Policy
 	if err := s.db.WithContext(ctx).First(&policy, id).Error; err != nil {
@@ -339,8 +322,8 @@ func (s *PolicyLogic) Delete(ctx context.Context, id int64) error {
 		if err := tx.Where("policy_id = ?", id).Delete(&model.PolicyAttachment{}).Error; err != nil {
 			return err
 		}
-		// 删除策略（显式清理语句明细后删除语句，再删除策略本身）
-		if err := deletePolicyStatements(tx, id); err != nil {
+		// 解除策略 ↔ 授权语句 关联（保留语句池中的语句）
+		if err := tx.Where("policy_id = ?", id).Delete(&model.PolicyStatementLink{}).Error; err != nil {
 			return err
 		}
 		// 物理删除：释放 name 唯一索引，避免删除后无法重建同名策略
@@ -359,127 +342,25 @@ func (s *PolicyLogic) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-// invalidatePolicyReferences 使所有引用指定策略的主体的权限缓存失效。
-func (s *PolicyLogic) invalidatePolicyReferences(ctx context.Context, policyID int64) {
-	if s.permLogic == nil {
-		return
+// statementsByIDs 按 ID 批量查询语句池中的语句（用于策略关联），校验存在性与归属可见性。
+// ownerID<=0（admin）不校验归属；否则仅允许关联 ownerID 本人创建（created_by=ownerID）
+// 或系统内置（created_by=0）的语句，防止越权引用他人私有语句。
+// 查询顺序不保证与入参一致，调用方应仅用于关联（排序由语句自身 Sort 决定）。
+func (s *PolicyLogic) statementsByIDs(ctx context.Context, ids []int64, ownerID int64) ([]model.Statement, error) {
+	var statements []model.Statement
+	if err := s.db.WithContext(ctx).Where("id IN ?", ids).Find(&statements).Error; err != nil {
+		return nil, err
 	}
-	var attachments []model.PolicyAttachment
-	if err := s.db.WithContext(ctx).Where("policy_id = ?", policyID).Find(&attachments).Error; err != nil {
-		return
+	if len(statements) != len(ids) {
+		return nil, errors.New("存在无效的授权语句 ID")
 	}
-	for _, a := range attachments {
-		s.permLogic.InvalidatePermissionCache(ctx, a.PrincipalType, a.PrincipalID)
-	}
-}
-
-// --- 内部辅助 ---
-
-// deletePolicyStatements 删除策略下全部授权语句及其明细（数据范围）。
-// 说明：GORM 的 Select 级联 Delete 不支持多级递归（Statements.Scopes 等），
-// 会产生孤儿明细，因此这里显式分步删除：先删明细（scopes），再删语句。
-func deletePolicyStatements(tx *gorm.DB, policyID int64) error {
-	var statementIDs []int64
-	if err := tx.Model(&model.PolicyStatement{}).Where("policy_id = ?", policyID).Pluck("id", &statementIDs).Error; err != nil {
-		return err
-	}
-	if len(statementIDs) == 0 {
-		return nil
-	}
-	if err := tx.Where("statement_id IN ?", statementIDs).Delete(&model.DataScope{}).Error; err != nil {
-		return err
-	}
-	return tx.Where("policy_id = ?", policyID).Delete(&model.PolicyStatement{}).Error
-}
-
-// validateStatements 校验策略授权规则的合法性（创建/更新统一入口）。
-// 校验 Effect 枚举、Action 非空、ScopeType 枚举及各类型数据范围的必填字段，
-// 避免非法取值写入后导致权限判定异常（如非 Deny 的 Effect 被当作允许）。
-func validateStatements(dtos []PolicyStatementDTO) error {
-	for i, sd := range dtos {
-		effect := strings.ToUpper(strings.TrimSpace(sd.Effect))
-		if effect != "ALLOW" && effect != "DENY" {
-			return fmt.Errorf("第 %d 条规则的 effect 必须为 Allow 或 Deny", i+1)
-		}
-		if strings.TrimSpace(sd.Action) == "" {
-			return fmt.Errorf("第 %d 条规则的 action 不能为空", i+1)
-		}
-		for j, sc := range sd.Scopes {
-			if !sc.ScopeType.Valid() {
-				return fmt.Errorf("第 %d 条规则第 %d 个数据范围的 scope_type 无效", i+1, j+1)
-			}
-			switch sc.ScopeType {
-			case model.DataScopeGroup:
-				if sc.GroupID <= 0 {
-					return fmt.Errorf("第 %d 条规则第 %d 个数据范围（group 类型）必须指定 group_id", i+1, j+1)
-				}
-			case model.DataScopeSelf:
-				if strings.TrimSpace(sc.OwnerField) == "" {
-					return fmt.Errorf("第 %d 条规则第 %d 个数据范围（self 类型）必须指定 owner_field", i+1, j+1)
-				}
-			case model.DataScopeAttribute:
-				if strings.TrimSpace(sc.AttrKey) == "" {
-					return fmt.Errorf("第 %d 条规则第 %d 个数据范围（attribute 类型）必须指定 attr_key", i+1, j+1)
-				}
+	// 非 admin：归属可见性校验
+	if ownerID > 0 {
+		for _, st := range statements {
+			if st.CreatedBy != 0 && st.CreatedBy != ownerID {
+				return nil, errors.New("存在无权关联的授权语句")
 			}
 		}
 	}
-	return nil
-}
-
-// normalizeResource 资源字段归一化：去空格，空视为 *（全部资源）。
-func normalizeResource(r string) string {
-	r = strings.TrimSpace(r)
-	if r == "" {
-		return "*"
-	}
-	return r
-}
-
-// buildStatements 构建策略的授权规则明细（Effect/Action 归一化：去空格 + 统一大写）。
-func buildStatements(dtos []PolicyStatementDTO, policy *model.Policy) {
-	for i, sd := range dtos {
-		statement := model.PolicyStatement{
-			Description: sd.Description,
-			Effect:      strings.ToUpper(strings.TrimSpace(sd.Effect)),
-			Action:      strings.TrimSpace(sd.Action),
-			Resource:    normalizeResource(sd.Resource),
-			Sort:        sd.Sort,
-		}
-		if statement.Sort == 0 {
-			statement.Sort = int64(i)
-		}
-		for _, sc := range sd.Scopes {
-			statement.Scopes = append(statement.Scopes, model.DataScope{
-				ScopeType:  sc.ScopeType,
-				GroupID:    sc.GroupID,
-				OwnerField: sc.OwnerField,
-				AttrKey:    sc.AttrKey,
-				AttrValue:  sc.AttrValue,
-				Sort:       sc.Sort,
-			})
-		}
-		policy.Statements = append(policy.Statements, statement)
-	}
-}
-
-// replacePolicyStatements 整体替换策略的授权规则（显式清理旧明细后重建）。
-func replacePolicyStatements(tx *gorm.DB, policy *model.Policy, dtos []PolicyStatementDTO) error {
-	// 显式清理旧授权语句及明细
-	if err := deletePolicyStatements(tx, policy.ID); err != nil {
-		return err
-	}
-
-	if len(dtos) == 0 {
-		return nil
-	}
-
-	newPolicy := model.Policy{ID: policy.ID}
-	buildStatements(dtos, &newPolicy)
-	// 显式填充 PolicyID：直接 Create slice 时 GORM 不会自动推断父 ID，否则会产生 policy_id=0 的孤儿语句。
-	for i := range newPolicy.Statements {
-		newPolicy.Statements[i].PolicyID = policy.ID
-	}
-	// 仅重建明细表（不触碰策略主表）
-	return tx.Create(&newPolicy.Statements).Error
+	return statements, nil
 }

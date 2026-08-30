@@ -16,11 +16,13 @@ import (
 //   - SeedData：是否初始化基础数据（内置 admin 账号、系统内置策略等）。
 func Migrate(db *gorm.DB, cfg config.MigrationConfig) error {
 	if cfg.AutoMigrate {
+		// 多对多关联表：策略 ↔ 授权语句（语句池，共享引用）
+		db.SetupJoinTable(&model.Policy{}, "Statements", &model.PolicyStatementLink{})
 		if err := db.AutoMigrate(
 			&model.Account{},
 			&model.Group{},
 			&model.Policy{},
-			&model.PolicyStatement{},
+			&model.Statement{},
 			&model.DataScope{},
 			&model.PolicyAttachment{},
 			&model.App{},
@@ -79,14 +81,15 @@ func seed(db *gorm.DB) error {
 			return err
 		}
 
-		// 系统内置策略：管理员全权限（system 类型，不可删除），规则拆分到明细表
+		// 系统内置策略：管理员全权限（system 类型，不可删除），
+		// 语句独立为语句池记录，策略与语句建立多对多关联。
 		adminPolicy := model.Policy{
 			Name:        "AdministratorAccess",
 			Description: "系统内置策略，允许管理全部资源",
 			Type:        model.PolicyTypeSystem,
 			Status:      true,
-			Statements: []model.PolicyStatement{
-				{Effect: "Allow", Action: "*"},
+			Statements: []model.Statement{
+				{Effect: model.EffectAllow, Action: "*", CreatedBy: 0},
 			},
 		}
 		if err := tx.Create(&adminPolicy).Error; err != nil {
@@ -119,22 +122,24 @@ func seedConsolePolicy(db *gorm.DB) error {
 
 	policy := model.Policy{
 		Name:        "ConsoleAccess",
-		Description: "系统内置策略，允许访问管理控制台各模块（账号/账号组/权限策略/授权/应用/审计/数据清理）",
-		Type:        model.PolicyTypeSystem,
+		Description: "系统内置策略，允许访问管理控制台各模块（账号/账号组/权限策略/授权语句/授权/应用/审计/数据清理）",
+		Type:        model.PolicyTypeCustom,
 		Status:      true,
-		Statements: []model.PolicyStatement{
+		Statements: []model.Statement{
 			// 身份管理
-			{Description: "账号管理", Effect: "Allow", Action: "iam:account:read,iam:account:write", Sort: 1},
-			{Description: "账号组管理", Effect: "Allow", Action: "iam:group:read,iam:group:write", Sort: 2},
+			{Description: "账号管理", Effect: model.EffectAllow, Action: "iam:account:read,iam:account:write", Sort: 1},
+			{Description: "账号组管理", Effect: model.EffectAllow, Action: "iam:group:read,iam:group:write", Sort: 2},
 			// 权限管理
-			{Description: "权限策略管理", Effect: "Allow", Action: "iam:policy:read,iam:policy:write", Sort: 3},
-			{Description: "授权管理", Effect: "Allow", Action: "iam:grant", Sort: 4},
+			{Description: "权限策略管理", Effect: model.EffectAllow, Action: "iam:policy:read,iam:policy:write", Sort: 3},
+			// 授权语句池（语句复用策略权限：独立菜单管理授权规则，策略只负责关联）
+			{Description: "授权语句管理", Effect: model.EffectAllow, Action: "iam:policy:read,iam:policy:write", Sort: 4},
+			{Description: "授权管理", Effect: model.EffectAllow, Action: "iam:grant", Sort: 5},
 			// 集成管理
-			{Description: "应用管理", Effect: "Allow", Action: "iam:app:read,iam:app:write", Sort: 5},
+			{Description: "应用管理", Effect: model.EffectAllow, Action: "iam:app:read,iam:app:write", Sort: 6},
 			// 安全审计
-			{Description: "操作审计", Effect: "Allow", Action: "iam:audit:read", Sort: 6},
+			{Description: "操作审计", Effect: model.EffectAllow, Action: "iam:audit:read", Sort: 7},
 			// 系统管理
-			{Description: "历史数据清理", Effect: "Allow", Action: "iam:system:cleanup", Sort: 7},
+			{Description: "历史数据清理", Effect: model.EffectAllow, Action: "iam:system:cleanup", Sort: 8},
 		},
 	}
 	return db.Create(&policy).Error

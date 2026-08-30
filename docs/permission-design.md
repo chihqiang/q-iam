@@ -12,10 +12,12 @@ q-iam 采用类云厂商 IAM 的三层权限模型，核心思想是 **"策略" 
 ┌─────────────────────────────────────────────────────────────┐
 │                        三层权限模型                          │
 │                                                             │
-│  ① 策略层  Policy ── PolicyStatement ── DataScope          │
-│            (策略)      (授权规则)         (数据范围)          │
+│  ① 语句池  Statement（授权语句，独立菜单管理）── DataScope  │
+│            （共享引用，可被多个策略关联）    (数据范围)       │
+│              ▲ 多对多关联（q_iam_policy_statements）        │
+│  ① 策略层  Policy（策略只负责关联语句，不内嵌编辑）         │
 │                                                             │
-│  ② 授权层  PolicyAttachment（策略 ↔ 主体 的绑定关系）        │
+│  ② 授权层  PolicyAttachment（策略 ↔ 主体 的绑定关系）       │
 │            主体：账号 account / 账号组 group / 应用 app       │
 │                                                             │
 │  ③ 判定层  PermissionSet.Check(action)                     │
@@ -25,6 +27,8 @@ q-iam 采用类云厂商 IAM 的三层权限模型，核心思想是 **"策略" 
 
 设计原则：
 
+- **语句池共享引用**：授权语句独立成池管理（独立菜单），一条语句可被多个策略关联；语句变更后，所有关联它的策略同步生效（权限缓存联动失效）
+- **策略只负责关联**：策略新增/编辑仅选择关联已有语句（`statement_ids`），不内嵌编辑语句
 - **策略可复用**：一份策略可授权给多个主体（账号/账号组/应用）
 - **权限叠加**：账号最终权限 = 直接绑定策略 + 所属账号组绑定策略
 - **显式拒绝优先**：`Deny` 优先级高于 `Allow`，安全兜底
@@ -42,27 +46,33 @@ q-iam 采用类云厂商 IAM 的三层权限模型，核心思想是 **"策略" 
 | `type` | `system`（系统内置，不可改/删）\| `custom`（自定义） |
 | `status` | 启用/禁用（禁用后授权关系不生效） |
 | `version` | 策略版本 |
-| `statements` | 授权规则明细（一对多） |
+| `statements` | 关联的授权语句（多对多，经关联表 `q_iam_policy_statements`） |
 
 系统内置策略（`type=system`，不可修改/删除）：
 
 | 策略名 | 规则 | 说明 |
 | --- | --- | --- |
 | `AdministratorAccess` | `Allow *` | 全权限，种子数据自动创建并授权给内置 `admin` 账号 |
-| `ConsoleAccess` | 控制台各模块动作（账号/账号组/策略/授权/应用/审计/数据清理） | 供普通账号/账号组/应用授权，以访问管理控制台各模块 |
+| `ConsoleAccess` | 控制台各模块动作（账号/账号组/权限策略/授权语句/授权/应用/审计/数据清理） | 供普通账号/账号组/应用授权，以访问管理控制台各模块 |
 
-### 2.2 授权规则 PolicyStatement（`q_iam_policy_statements`）
+### 2.2 授权语句 Statement（`q_iam_statements`，语句池）
 
-策略下的每一条授权规则（一条一行，避免单字段过大）：
+授权语句独立成池管理（独立菜单）：
 
 ```json
 {
   "effect": "Allow",          // Allow | Deny
   "action": "iam:account:read,iam:account:write",  // 逗号分隔，支持 *
   "description": "只读账号",
+  "resource": "*",           // 资源（支持通配，默认 *）
   "scopes": []                // 数据范围（见 2.3）
 }
 ```
+
+- 可被多个策略共享引用（多对多，关联表 `q_iam_policy_statements` 仅存 `policy_id` + `statement_id`）
+- 修改语句后，所有关联它的策略对应主体的权限缓存即时失效
+- 被策略关联的语句禁止删除（须先解除全部关联）；系统内置语句（`created_by=0`）不可删除
+- 非 admin 仅可管理本人创建的语句，且只能关联本人创建或系统内置的语句
 
 ### 2.3 数据范围 DataScope（`q_iam_statement_scopes`）
 
@@ -302,11 +312,12 @@ authed.AddRoutes([]httpx.Route{
 
 | 文件 | 职责 |
 | --- | --- |
-| `model/policy.go` | Policy / PolicyStatement / DataScope / PolicyAttachment / PrincipalType 模型 |
+| `model/policy.go` | Policy / Statement / DataScope / PolicyStatementLink / PolicyAttachment / PrincipalType 模型 |
 | `logic/permission.go` | 权限加载（LoadPermissionSet）、判定（Check）、通配匹配、缓存 |
+| `logic/statement.go` | 授权语句（语句池）CRUD：独立菜单管理，被策略关联禁止删除 |
+| `logic/policy.go` | 策略 CRUD + 关联语句（statement_ids，共享引用） |
 | `logic/grant.go` | 授权/解绑（Grant / Revoke）、失效权限缓存 |
 | `middleware/permission.go` | 动作级权限校验中间件（admin 放行） |
-| `logic/policy.go` | 策略 CRUD |
-| `db/migrate.go` | 种子数据（内置 admin + AdministratorAccess 系统策略） |
+| `db/migrate.go` | 种子数据（内置 admin + AdministratorAccess/ConsoleAccess 系统策略） |
 | `svc/servicecontext.go` | 服务上下文：集中装配权限逻辑与 infra-go cache（MemCache / RedisCache）缓存注入 |
 | `route/route.go` | 路由声明各动作所需权限 |

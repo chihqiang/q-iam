@@ -1,11 +1,15 @@
 // Package model 定义 q-iam 的数据模型。
 //
 // policy.go 承载权限策略体系的全部模型：
-//   - Policy / PolicyStatement / DataScope：权限策略及其授权规则明细
+//   - Policy / Statement / DataScope：权限策略及其授权语句（语句池，策略通过关联共享引用）
+//   - PolicyStatementLink：策略 ↔ 语句 多对多关联表
 //   - PrincipalType / PolicyAttachment：授权主体类型与授权关系（策略绑定到主体）
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // 策略类型。
 const (
@@ -14,6 +18,18 @@ const (
 	// PolicyTypeCustom 自定义策略，可编辑/删除。
 	PolicyTypeCustom = "custom"
 )
+
+// 授权效果（Effect）常量（统一引用，避免字符串字面量散落各处）。
+// 校验用 EqualFold 大小写不敏感；存储与对外展示统一用 EffectAllow / EffectDeny。
+const (
+	EffectAllow = "Allow"
+	EffectDeny  = "Deny"
+)
+
+// IsValidEffect 判断字符串是否为合法授权效果（大小写不敏感）。
+func IsValidEffect(e string) bool {
+	return strings.EqualFold(e, EffectAllow) || strings.EqualFold(e, EffectDeny)
+}
 
 // Policy 权限策略（系统/自定义策略），权限管理核心实体。
 // 策略声明某类主体（账号/账号组/角色/应用）可执行的操作（Action）与资源（Resource）；
@@ -30,8 +46,9 @@ type Policy struct {
 	Type string `json:"type" gorm:"size:16;default:custom;comment:策略类型 system/custom"`
 	// Status 状态（启用/禁用），禁用后授权关系不生效。
 	Status bool `json:"status" gorm:"default:true;comment:状态（启用/禁用）"`
-	// Statements 策略授权规则明细。
-	Statements []PolicyStatement `json:"statements" gorm:"foreignKey:PolicyID"`
+	// Statements 策略关联的授权语句（多对多，语句池共享引用）。
+	// 语句独立维护（见 Statement），策略新增/编辑只负责关联（选择已有语句）。
+	Statements []Statement `json:"statements" gorm:"many2many:q_iam_policy_statements;"`
 	// CreatedBy 创建者用户 ID，0 表示系统创建。
 	CreatedBy int64      `json:"created_by" gorm:"comment:创建者用户ID"`
 	CreatedAt time.Time  `json:"created_at" gorm:"comment:创建时间"`
@@ -44,7 +61,11 @@ func (Policy) TableName() string {
 	return "q_iam_policies"
 }
 
-// PolicyStatement 策略授权规则（明细表）。
+// Statement 授权语句（语句池，独立菜单管理）。
+// 定义一条完整的授权规则：效果（Allow/Deny）+ 操作（Action）+ 资源（Resource）
+// + 数据范围（Scopes）。语句独立维护，可被多个策略共享引用（多对多关联，
+// 见 PolicyStatementLink），修改语句后所有关联该语句的策略同步生效。
+//
 // 对应策略 JSON 中的一条 Statement：
 //
 //	{
@@ -53,10 +74,8 @@ func (Policy) TableName() string {
 //	  "Resource": "*",
 //	  "Condition": {...}
 //	}
-type PolicyStatement struct {
+type Statement struct {
 	ID int64 `json:"id" gorm:"primaryKey;autoIncrement;comment:主键ID"`
-	// PolicyID 所属权限策略 ID。
-	PolicyID int64 `json:"policy_id" gorm:"not null;index;comment:权限策略ID"`
 	// Description 语句描述（小标题，说明本条授权规则的用途）。
 	Description string `json:"description" gorm:"size:255;comment:语句描述"`
 	// Effect 效果：Allow（允许）| Deny（拒绝）。
@@ -71,12 +90,31 @@ type PolicyStatement struct {
 	Scopes []DataScope `json:"scopes" gorm:"foreignKey:StatementID"`
 	// Sort 排序。
 	Sort int64 `json:"sort" gorm:"default:0;comment:排序"`
+	// CreatedBy 创建者用户 ID，0 表示系统创建。
+	CreatedBy int64 `json:"created_by" gorm:"comment:创建者用户ID"`
 	// CreatedAt 创建时间。
 	CreatedAt time.Time `json:"created_at" gorm:"comment:创建时间"`
+	// UpdatedAt 更新时间。
+	UpdatedAt time.Time `json:"updated_at" gorm:"comment:更新时间"`
+	// DeletedAt 删除时间（软删除；被策略关联时禁止删除）。
+	DeletedAt *time.Time `json:"-" gorm:"index;comment:删除时间"`
 }
 
 // TableName 指定表名。
-func (PolicyStatement) TableName() string {
+func (Statement) TableName() string {
+	return "q_iam_statements"
+}
+
+// PolicyStatementLink 策略 ↔ 授权语句 多对多关联（关联表）。
+// 语句池共享引用：一条语句可被多个策略关联，一个策略可关联多条语句。
+// 删除策略仅解除关联（不删语句池）；删除语句需先解除全部关联（禁止删除）。
+type PolicyStatementLink struct {
+	PolicyID    int64 `json:"-" gorm:"primaryKey;comment:策略ID"`
+	StatementID int64 `json:"-" gorm:"primaryKey;comment:授权语句ID"`
+}
+
+// TableName 指定表名。
+func (PolicyStatementLink) TableName() string {
 	return "q_iam_policy_statements"
 }
 

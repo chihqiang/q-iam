@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"chihqiang/q-iam/config"
+	"chihqiang/q-iam/model"
 	"chihqiang/q-iam/route"
 	"chihqiang/q-iam/svc"
 
@@ -126,6 +127,25 @@ func (e *testEnv) login(t *testing.T, name, pass string) (at, rt string) {
 }
 
 // ---------- 断言辅助 ----------
+
+// createStatement 创建授权语句（语句池），返回语句 ID。
+func (e *testEnv) createStatement(t *testing.T, token string, payload map[string]any) float64 {
+	t.Helper()
+	r := e.do(t, http.MethodPost, "/statements", token, payload)
+	mustCode(t, r, 0)
+	return dataMap(t, r)["id"].(float64)
+}
+
+// createPolicy 创建策略并关联指定语句，返回策略 ID。
+func (e *testEnv) createPolicy(t *testing.T, token string, name string, payload map[string]any) float64 {
+	t.Helper()
+	r := e.do(t, http.MethodPost, "/policies", token, payload)
+	mustCode(t, r, 0)
+	if got := dataMap(t, r)["name"].(string); got != name {
+		t.Fatalf("策略名 %q != %q", got, name)
+	}
+	return dataMap(t, r)["id"].(float64)
+}
 
 func mustCode(t *testing.T, r apiResp, want float64) {
 	t.Helper()
@@ -235,13 +255,14 @@ func TestEndToEndSmoke(t *testing.T) {
 	// ============ P5 策略 Resource 字段 ============
 	var policyID float64
 	t.Run("P5 策略 Resource 字段", func(t *testing.T) {
+		sid := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:account:read", "resource": "*",
+			"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
+			"sort":   0,
+		})
 		r := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
 			"name": "ViewOwnAccounts", "description": "仅本人",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:account:read", "resource": "*",
-				"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
-				"sort":   0,
-			}},
+			"statement_ids": []any{sid},
 		})
 		mustCode(t, r, 0)
 		policyID = dataMap(t, r)["id"].(float64)
@@ -350,13 +371,14 @@ func TestEndToEndSmoke(t *testing.T) {
 		mustCode(t, mem, 0)
 
 		// ViewOwnGroups: iam:group:read + scope self
+		sid := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:group:read", "resource": "*",
+			"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
+			"sort":   0,
+		})
 		pg := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
 			"name": "ViewOwnGroups", "description": "仅本人所属组",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:group:read", "resource": "*",
-				"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
-				"sort":   0,
-			}},
+			"statement_ids": []any{sid},
 		})
 		mustCode(t, pg, 0)
 		gg := e.do(t, http.MethodPost, "/grants", adminAT, map[string]any{
@@ -381,20 +403,21 @@ func TestEndToEndSmoke(t *testing.T) {
 	// ============ P8 策略列表数据范围（self→仅本人创建）============
 	t.Run("P8 策略列表按数据范围过滤", func(t *testing.T) {
 		// 给 user1 授 iam:policy:write + iam:policy:read(self)
+		sidw := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:policy:write", "resource": "*", "sort": 0,
+		})
 		pw := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
-			"name": "WritePolicies",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:policy:write", "resource": "*", "sort": 0,
-			}},
+			"name": "WritePolicies", "statement_ids": []any{sidw},
 		})
 		mustCode(t, pw, 0)
+		sidr := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:policy:read", "resource": "*",
+			"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
+			"sort":   0,
+		})
 		pp := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
 			"name": "ViewOwnPolicies", "description": "仅本人创建的策略",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:policy:read", "resource": "*",
-				"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
-				"sort":   0,
-			}},
+			"statement_ids": []any{sidr},
 		})
 		mustCode(t, pp, 0)
 		for _, pid := range []any{dataMap(t, pw)["id"], dataMap(t, pp)["id"]} {
@@ -404,12 +427,12 @@ func TestEndToEndSmoke(t *testing.T) {
 			mustCode(t, g, 0)
 		}
 
-		// user1 创建自己的策略
+		// user1 创建自己的策略（先建自己的语句，再关联）
+		mysid := e.createStatement(t, user1AT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:account:read", "resource": "*", "sort": 0,
+		})
 		my := e.do(t, http.MethodPost, "/policies", user1AT, map[string]any{
-			"name": "MyPolicy",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:account:read", "resource": "*", "sort": 0,
-			}},
+			"name": "MyPolicy", "statement_ids": []any{mysid},
 		})
 		mustCode(t, my, 0)
 
@@ -434,20 +457,21 @@ func TestEndToEndSmoke(t *testing.T) {
 		mustCode(t, app1, 0)
 		app1ID := dataMap(t, app1)["id"].(float64)
 
+		sidw := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:app:write", "resource": "*", "sort": 0,
+		})
 		pw := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
-			"name": "WriteApps",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:app:write", "resource": "*", "sort": 0,
-			}},
+			"name": "WriteApps", "statement_ids": []any{sidw},
 		})
 		mustCode(t, pw, 0)
+		sidr := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:app:read", "resource": "*",
+			"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
+			"sort":   0,
+		})
 		pa := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
 			"name": "ViewOwnApps", "description": "仅本人拥有的应用",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:app:read", "resource": "*",
-				"scopes": []any{map[string]any{"scope_type": "self", "owner_field": "id", "sort": 0}},
-				"sort":   0,
-			}},
+			"statement_ids": []any{sidr},
 		})
 		mustCode(t, pa, 0)
 		for _, pid := range []any{dataMap(t, pw)["id"], dataMap(t, pa)["id"]} {
@@ -489,13 +513,14 @@ func TestEndToEndSmoke(t *testing.T) {
 		mustCode(t, mem, 0)
 
 		// ViewGroupAccounts: iam:account:read + scope group(groupA)
+		sid := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:account:read", "resource": "*",
+			"scopes": []any{map[string]any{"scope_type": "group", "group_id": groupA, "sort": 0}},
+			"sort":   0,
+		})
 		pg := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
 			"name": "ViewGroupAccounts", "description": "查看 groupA 内账号",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:account:read", "resource": "*",
-				"scopes": []any{map[string]any{"scope_type": "group", "group_id": groupA, "sort": 0}},
-				"sort":   0,
-			}},
+			"statement_ids": []any{sid},
 		})
 		mustCode(t, pg, 0)
 		g := e.do(t, http.MethodPost, "/grants", adminAT, map[string]any{
@@ -515,11 +540,11 @@ func TestEndToEndSmoke(t *testing.T) {
 	// ============ P11 授权管理(grants)列表数据范围 ============
 	t.Run("P11 grants 列表按数据范围过滤", func(t *testing.T) {
 		// 给 user1 授 iam:grant
+		sid := e.createStatement(t, adminAT, map[string]any{
+			"effect": model.EffectAllow, "action": "iam:grant", "resource": "*", "sort": 0,
+		})
 		pg := e.do(t, http.MethodPost, "/policies", adminAT, map[string]any{
-			"name": "GrantPolicy",
-			"statements": []any{map[string]any{
-				"effect": "Allow", "action": "iam:grant", "resource": "*", "sort": 0,
-			}},
+			"name": "GrantPolicy", "statement_ids": []any{sid},
 		})
 		mustCode(t, pg, 0)
 		g := e.do(t, http.MethodPost, "/grants", adminAT, map[string]any{

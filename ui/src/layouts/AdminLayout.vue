@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import ToastContainer from '@/components/ui/ToastContainer.vue'
 import CleanupDialog from '@/components/system/CleanupDialog.vue'
 import { getMenuGroups } from '@/router'
+import { EFFECT_DENY } from '@/types'
 import type { PermissionStatement } from '@/types'
 
 const route = useRoute()
@@ -25,7 +26,7 @@ function hasAction(perms: PermissionStatement[] | undefined, action: string): bo
   let allowed = false
   for (const p of perms) {
     if (!globMatch(p.action, action)) continue
-    if (p.effect === 'Deny') return false
+    if (p.effect === EFFECT_DENY) return false
     allowed = true
   }
   return allowed

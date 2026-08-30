@@ -1,19 +1,14 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
-import { Loader2, ShieldCheck } from '@lucide/vue'
+import { Loader2, Link2 } from '@lucide/vue'
 import Modal from '@/components/ui/Modal.vue'
-import PolicyStatementEditor from '@/components/policy/PolicyStatementEditor.vue'
+import StatementPicker from '@/components/statement/StatementPicker.vue'
 import { useToastStore } from '@/stores/toast'
-import {
-  createPolicy,
-  updatePolicy,
-  getPolicy,
-  statementsToDTO,
-  type PolicyStatementDTO,
-} from '@/api/policies'
+import { createPolicy, updatePolicy, getPolicy } from '@/api/policies'
 import type { Policy } from '@/types'
 
-// 新增 / 编辑权限策略弹窗
+// 新增 / 编辑权限策略弹窗。
+// 授权语句独立成池管理（见「授权语句」菜单），策略只负责关联（选择已有语句）。
 const props = withDefaults(
   defineProps<{
     open: boolean
@@ -37,7 +32,8 @@ const form = reactive({
   name: '',
   description: '',
   status: true,
-  statements: [] as PolicyStatementDTO[],
+  // 关联的授权语句 ID 列表（语句池共享引用）
+  statement_ids: [] as number[],
 })
 
 const saving = ref(false)
@@ -52,11 +48,11 @@ watch(
       form.name = props.target.name
       form.description = props.target.description
       form.status = props.target.status
-      form.statements = []
+      form.statement_ids = []
       loadingDetail.value = true
       try {
         const detail = await getPolicy(props.target.id)
-        form.statements = statementsToDTO(detail.statements ?? [])
+        form.statement_ids = (detail.statements ?? []).map((s) => s.id)
       } catch (e) {
         toast.error((e as Error).message)
       } finally {
@@ -66,7 +62,7 @@ watch(
       form.name = ''
       form.description = ''
       form.status = true
-      form.statements = []
+      form.statement_ids = []
     }
     error.value = ''
   }
@@ -77,8 +73,8 @@ async function handleSave() {
     error.value = '请输入策略名'
     return
   }
-  if (form.statements.length === 0) {
-    error.value = '至少需要一条授权语句'
+  if (form.statement_ids.length === 0) {
+    error.value = '至少关联一条授权语句'
     return
   }
   error.value = ''
@@ -89,14 +85,14 @@ async function handleSave() {
         name: form.name.trim(),
         description: form.description,
         status: form.status,
-        statements: form.statements,
+        statement_ids: form.statement_ids,
       })
       toast.success('策略创建成功')
     } else if (props.target) {
       await updatePolicy(props.target.id, {
         description: form.description,
         status: form.status,
-        statements: form.statements,
+        statement_ids: form.statement_ids,
       })
       toast.success('策略已更新')
     }
@@ -160,17 +156,19 @@ async function handleSave() {
         />
       </div>
 
-      <!-- 授权语句编辑器 -->
+      <!-- 关联授权语句（语句池） -->
       <div class="rounded-lg border border-border bg-card">
         <div class="flex items-center gap-2 border-b border-border bg-muted/30 px-4 py-2.5">
-          <ShieldCheck class="h-4 w-4 text-muted-foreground" />
+          <Link2 class="h-4 w-4 text-muted-foreground" />
           <div>
-            <h3 class="text-sm font-semibold text-foreground">授权语句 Statements</h3>
-            <p class="text-xs text-muted-foreground">声明允许/拒绝哪些操作，作用于哪些资源</p>
+            <h3 class="text-sm font-semibold text-foreground">关联授权语句</h3>
+            <p class="text-xs text-muted-foreground">
+              从「授权语句」池中选择已有语句，语句独立维护，可被多个策略共享
+            </p>
           </div>
         </div>
         <div class="p-4">
-          <PolicyStatementEditor v-model="form.statements" />
+          <StatementPicker v-model="form.statement_ids" />
         </div>
       </div>
 

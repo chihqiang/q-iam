@@ -1,6 +1,10 @@
 package logic
 
-import "testing"
+import (
+	"testing"
+
+	"chihqiang/q-iam/model"
+)
 
 // TestScopeAllowsAction 验证 scope 到权限动作的匹配语义。
 func TestScopeAllowsAction(t *testing.T) {
@@ -38,9 +42,9 @@ func TestScopeAllowsAction(t *testing.T) {
 // TestFilterPermissionsByScope 验证权限语句按 scope 过滤。
 func TestFilterPermissionsByScope(t *testing.T) {
 	perms := []PermissionStatement{
-		{Effect: "Allow", Action: "iam:account:read", Source: "p1"},
-		{Effect: "Allow", Action: "iam:account:write", Source: "p2"},
-		{Effect: "Allow", Action: "iam:audit:read", Source: "p3"},
+		{Effect: model.EffectAllow, Action: "iam:account:read", Source: "p1"},
+		{Effect: model.EffectAllow, Action: "iam:account:write", Source: "p2"},
+		{Effect: model.EffectAllow, Action: "iam:audit:read", Source: "p3"},
 	}
 
 	// 空 scope：原样返回

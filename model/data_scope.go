@@ -32,9 +32,10 @@ func (t DataScopeType) String() string {
 	return string(t)
 }
 
-// DataScope 策略语句的数据范围（明细表）。
-// 作为 PolicyStatement 的子表，每条数据范围一行，
-// 不存 JSON，随策略 CRUD 整体维护（级联删除 + 重建）。
+// DataScope 授权语句的数据范围（明细表）。
+// 作为语句池 Statement 的子表，每条数据范围一行，不存 JSON，
+// 随语句 CRUD 整体维护（级联删除 + 重建）。语句被策略共享引用时，
+// 其数据范围对引用该语句的所有策略同时生效。
 type DataScope struct {
 	ID int64 `json:"id" gorm:"primaryKey;autoIncrement;comment:主键ID"`
 	// StatementID 所属 Statement ID。

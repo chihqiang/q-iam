@@ -1,6 +1,6 @@
 // 权限策略 API
 import { get, post, put, del } from './client'
-import type { Policy, Paginated, PolicyStatement } from '@/types'
+import type { Policy, Paginated } from '@/types'
 
 export interface PolicyListParams {
   page: number
@@ -10,41 +10,19 @@ export interface PolicyListParams {
   status?: boolean
 }
 
-// 策略语句数据范围 DTO（对齐后端 PolicyScopeDTO）
-export interface PolicyScopeDTO {
-  scope_type: 'all' | 'group' | 'self' | 'attribute'
-  // group_id 可为 null（Select 清空时写回），提交前由组件归一为 undefined
-  group_id?: number | null
-  owner_field?: string
-  attr_key?: string
-  attr_value?: string
-  sort: number
-}
-
-// 策略语句 DTO（对齐后端 PolicyStatementDTO）
-export interface PolicyStatementDTO {
-  // 语句描述（小标题，说明本条授权规则的用途）
-  description?: string
-  effect: 'Allow' | 'Deny'
-  action: string
-  // 资源（支持 * 通配，默认 * 表示全部资源）
-  resource?: string
-  // 数据范围（数据权限）
-  scopes: PolicyScopeDTO[]
-  sort: number
-}
-
 export interface PolicyCreatePayload {
   name: string
   description?: string
   status?: boolean
-  statements: PolicyStatementDTO[]
+  // 关联的授权语句 ID 列表（语句池共享引用，至少一条）
+  statement_ids: number[]
 }
 
 export interface PolicyUpdatePayload {
   description?: string
   status?: boolean
-  statements?: PolicyStatementDTO[] | null
+  // 关联的授权语句 ID 列表（传 null/undefined 表示不修改关联，传数组则整体替换）
+  statement_ids?: number[] | null
 }
 
 export const listPolicies = (params: PolicyListParams) =>
@@ -62,20 +40,3 @@ export const updatePolicy = (id: number, payload: PolicyUpdatePayload) =>
 
 export const deletePolicy = (id: number) => del<void>(`/policies/${id}`)
 
-// 从后端模型转换为编辑表单用的语句 DTO
-export function statementsToDTO(statements: PolicyStatement[]): PolicyStatementDTO[] {
-  return (statements ?? []).map((s, si) => ({
-    description: s.description ?? '',
-    effect: s.effect,
-    action: s.action,
-    scopes: (s.scopes ?? []).map((sc, sci) => ({
-      scope_type: sc.scope_type,
-      group_id: sc.group_id,
-      owner_field: sc.owner_field,
-      attr_key: sc.attr_key,
-      attr_value: sc.attr_value,
-      sort: sci,
-    })),
-    sort: si,
-  }))
-}

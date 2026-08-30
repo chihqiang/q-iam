@@ -113,6 +113,10 @@ func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.ID = id
+	// 注入当前操作账号 ID（非 admin 仅可关联本人创建/系统内置的语句）
+	if account := middleware.AccountFromContext(ctx); account != nil {
+		req.CreatedBy = account.ID
+	}
 
 	policy, err := h.svc.Update(ctx, &req)
 	if err != nil {

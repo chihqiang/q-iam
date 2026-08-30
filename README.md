@@ -14,10 +14,11 @@
 ### 权限管理（Permission）
 
 - **策略**：系统内置策略（`AdministratorAccess`，不可改删）+ 自定义策略
-- **授权规则**：策略 → 语句（Statement）→ 数据范围（DataScope）三级明细，支持 `Allow`/`Deny`、`*` 通配
+- **授权语句（语句池）**：语句独立菜单管理，可被多个策略共享引用；策略新增/编辑只负责关联已有语句（`statement_ids`），语句变更后关联策略即时生效
+- **授权规则**：语句（Statement）→ 数据范围（DataScope），支持 `Allow`/`Deny`、`*` 通配
 - **授权**：策略绑定到 账号/账号组/应用 三种主体
 - **数据权限**：`all` / `group` / `self` / `attribute` 四种数据范围
-- **判定语义**：显式 `Deny` 优先；权限集始终缓存（无 Redis 用进程内 MemCache，配置 Redis 后切换 RedisCache），授权变更即时失效
+- **判定语义**：显式 `Deny` 优先；权限集始终缓存（无 Redis 用进程内 MemCache，配置 Redis 后切换 RedisCache），授权/语句变更即时失效
 
 ### 认证与安全（AuthN/AuthZ）
 
@@ -202,6 +203,8 @@ q-iam/
 | 账号组 | `POST/DELETE/PUT /groups/{id}/members` | 成员管理 |
 | 策略 | `GET/POST /policies`，`GET/PUT/DELETE /policies/{id}` | 策略 CRUD |
 | 策略 | `GET /policies/all` | 全部启用策略（授权选择用） |
+| 授权语句 | `GET/POST /statements`，`GET/PUT/DELETE /statements/{id}` | 授权语句池 CRUD（独立菜单，策略只负责关联） |
+| 授权语句 | `GET /statements/all` | 全部语句（策略关联选择用） |
 | 授权 | `POST/DELETE /grants`，`GET /grants/...` | 策略绑定/解绑/查询 |
 | 应用 | `GET/POST /apps`，`GET/PUT/DELETE /apps/{id}` | 应用 CRUD |
 | 应用 | `GET /apps/all` | 全部启用应用（下拉用） |
