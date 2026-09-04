@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 	"chihqiang/q-iam/middleware"
@@ -59,9 +58,9 @@ func (h *GrantHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 // ListByPrincipal 查询主体已绑定的策略（按数据范围过滤）。
 func (h *GrantHandler) ListByPrincipal(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	principalType := model.PrincipalType(r.PathValue("type"))
-	principalID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	principalType := model.PrincipalType(httpx.PathValue(r, "type", ""))
+	principalID := httpx.PathValue(r, "id", int64(0))
+	if principalID <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -77,8 +76,8 @@ func (h *GrantHandler) ListByPrincipal(w http.ResponseWriter, r *http.Request) {
 // ListPrincipals 查询策略被哪些主体绑定（按数据范围过滤）。
 func (h *GrantHandler) ListPrincipals(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	policyID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	policyID := httpx.PathValue(r, "id", int64(0))
+	if policyID <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}

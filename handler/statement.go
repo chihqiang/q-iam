@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 	"chihqiang/q-iam/middleware"
@@ -51,8 +50,8 @@ func (h *StatementHandler) AllList(w http.ResponseWriter, r *http.Request) {
 // Detail 语句详情（含数据范围明细）。
 func (h *StatementHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -89,8 +88,8 @@ func (h *StatementHandler) Create(w http.ResponseWriter, r *http.Request) {
 // Update 更新授权语句。
 func (h *StatementHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -125,8 +124,8 @@ func (h *StatementHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Delete 删除授权语句（被策略关联时禁止删除）。
 func (h *StatementHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}

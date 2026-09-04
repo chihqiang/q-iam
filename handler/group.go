@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 
@@ -49,8 +48,8 @@ func (h *GroupHandler) AllList(w http.ResponseWriter, r *http.Request) {
 // Detail 账号组详情（按数据范围校验可见性，防止越权查看）。
 func (h *GroupHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -95,8 +94,8 @@ func (h *GroupHandler) Create(w http.ResponseWriter, r *http.Request) {
 // Update 更新账号组。
 func (h *GroupHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -118,8 +117,8 @@ func (h *GroupHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Delete 删除账号组。
 func (h *GroupHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -134,8 +133,8 @@ func (h *GroupHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // AddMembers 添加成员。
 func (h *GroupHandler) AddMembers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -155,8 +154,8 @@ func (h *GroupHandler) AddMembers(w http.ResponseWriter, r *http.Request) {
 // RemoveMembers 移除成员。
 func (h *GroupHandler) RemoveMembers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -176,8 +175,8 @@ func (h *GroupHandler) RemoveMembers(w http.ResponseWriter, r *http.Request) {
 // ReplaceMembers 覆盖成员。
 func (h *GroupHandler) ReplaceMembers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}

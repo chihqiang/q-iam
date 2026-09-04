@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 
@@ -49,8 +48,8 @@ func (h *AppHandler) AllList(w http.ResponseWriter, r *http.Request) {
 // Detail 应用详情（按数据范围校验可见性，防止越权查看）。
 func (h *AppHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -95,8 +94,8 @@ func (h *AppHandler) Create(w http.ResponseWriter, r *http.Request) {
 // Update 更新应用。
 func (h *AppHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -118,8 +117,8 @@ func (h *AppHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Delete 删除应用。
 func (h *AppHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -134,8 +133,8 @@ func (h *AppHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // ResetSecret 重置客户端密钥。
 func (h *AppHandler) ResetSecret(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}

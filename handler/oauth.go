@@ -26,7 +26,7 @@ func NewOAuthHandler(svc *logic.OAuthLogic) *OAuthHandler {
 // GET /oauth/app-info?client_id=xxx
 func (h *OAuthHandler) AppInfo(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	clientID := r.URL.Query().Get("client_id")
+	clientID := httpx.QueryValue(r, "client_id", "")
 	if clientID == "" {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "缺少 client_id")
 		return

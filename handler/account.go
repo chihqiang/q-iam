@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 	"chihqiang/q-iam/middleware"
@@ -62,8 +61,8 @@ func (h *AccountHandler) AllList(w http.ResponseWriter, r *http.Request) {
 // 非 admin 账号按数据范围（self/group）校验可见性，防止越权查看他人账号。
 func (h *AccountHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -109,8 +108,8 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 // Update 更新账号。
 func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -132,8 +131,8 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Delete 删除账号。
 func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -148,8 +147,8 @@ func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // ChangePassword 修改密码。
 func (h *AccountHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -170,8 +169,8 @@ func (h *AccountHandler) ChangePassword(w http.ResponseWriter, r *http.Request) 
 // ResetPassword 重置密码（管理员）。
 func (h *AccountHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}

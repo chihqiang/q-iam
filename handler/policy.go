@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"chihqiang/q-iam/logic"
 	"chihqiang/q-iam/middleware"
@@ -51,8 +50,8 @@ func (h *PolicyHandler) AllList(w http.ResponseWriter, r *http.Request) {
 // Detail 策略详情（按数据范围校验可见性，防止越权查看）。
 func (h *PolicyHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -102,8 +101,8 @@ func (h *PolicyHandler) Create(w http.ResponseWriter, r *http.Request) {
 // Update 更新策略。
 func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
@@ -129,8 +128,8 @@ func (h *PolicyHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Delete 删除策略。
 func (h *PolicyHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	id := httpx.PathValue(r, "id", int64(0))
+	if id <= 0 {
 		httpx.WriteHTTPErrorCtx(ctx, w, httpx.CodeBadRequest, "无效的ID")
 		return
 	}
