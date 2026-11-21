@@ -1,0 +1,56 @@
+# ============================================================
+# q-iam 前端（web/）忽略规则
+# ============================================================
+
+# 依赖目录
+node_modules/
+
+# 构建产物
+dist/
+dist-ssr/
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 环境变量（可能包含密钥/token）
+.env
+.env.local
+.env.*.local
+
+# 类型检查 / 编译缓存
+*.tsbuildinfo
+*.d.ts.map
+*.js.map
+# vite 编译产生的 js/d.ts（源码是 .ts，这些是 emit 产物）
+vite.config.js
+vite.config.d.ts
+vite.config.js.map
+
+# 编辑器 / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 测试覆盖率
+coverage/
+*.lcov
+*.lcov.info
+
+# 缓存
+.temp/
+.cache/
+.eslintcache
+
+# 操作系统
+Thumbs.db
